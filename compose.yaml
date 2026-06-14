@@ -1,0 +1,65 @@
+name: super-mcp
+
+services:
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: super_mcp_redis
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - super_mcp_redis_data:/data
+    restart: unless-stopped
+    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: super_mcp_server
+    environment:
+      - STORAGE_DRIVER=redis
+      - TELEMETRY_DRIVER=stdout
+      - TRANSPORT_DRIVER=http
+      - HTTP_HOST=0.0.0.0
+      - HTTP_PORT=3333
+      - MCP_AUTH_MODE=${MCP_AUTH_MODE:-jwt}
+      - MCP_JWT_SECRET=${MCP_JWT_SECRET:?set MCP_JWT_SECRET}
+      - MCP_JWT_ISSUER=${MCP_JWT_ISSUER:?set MCP_JWT_ISSUER}
+      - MCP_JWT_AUDIENCE=${MCP_JWT_AUDIENCE:?set MCP_JWT_AUDIENCE}
+      - MCP_JWKS_URI=${MCP_JWKS_URI:-}
+      - MCP_AUTHORIZATION_SERVERS=${MCP_AUTHORIZATION_SERVERS:-}
+      - MCP_RESOURCE_URI=${MCP_RESOURCE_URI:?set MCP_RESOURCE_URI}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:?set ALLOWED_HOSTS}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:?set ALLOWED_ORIGINS}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      - ENABLE_RATE_LIMIT=true
+      - RATE_LIMIT_MAX_REQUESTS=100
+      - ENABLE_QUOTA=true
+      - MCP_ENCRYPTION_KEY=${MCP_ENCRYPTION_KEY:?set MCP_ENCRYPTION_KEY}
+      - MCP_ALLOW_LEGACY_SHA256_KDF=false
+      - MCP_REDIS_MAX_BACKUPS=25
+      - MCP_HTTP_BODY_LIMIT=100kb
+      - MCP_PLUGIN_ALLOWLIST=system.tool.js
+      - MCP_PLUGIN_ISOLATION_MODE=policy
+      - MCP_SAFE_MODE=true
+    depends_on:
+      - redis
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    # Intentionally no public port mapping by default. Expose only behind a trusted ingress/reverse proxy.
+
+volumes:
+  super_mcp_redis_data:

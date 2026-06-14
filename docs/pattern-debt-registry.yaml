@@ -1,0 +1,82 @@
+version: 3
+generated_from: "Phase 9 debt reconciliation after structured redaction, plugin runner hardening, OAuth resource enforcement, runner interface, permission-mode opt-in, crypto-erasure ADR, and Tasks SDK monitoring docs."
+phase5_decision: "Do not ship placeholder security integrations. Keep true residual debt visible and only mark resource-server/resource-output gaps as implemented when code and tests prove them."
+items:
+  DEBT-001-plugin-os-isolation:
+    status: open
+    urgency: release_blocking
+    current_control: "Allowlist, optional SHA-256 allowlist, capability declarations, safe mode, manifest pinning, pluggable runner interface, process-best-effort child runner, stderr cap, single-settle lifecycle, abort/timeout hard-stop, scrubbed environment without PATH, expanded JS-level guards, optional node-permission-best-effort mode, and production fail-closed gate for non-built-in plugins unless MCP_ALLOW_BEST_EFFORT_PLUGIN_SANDBOX=true is explicitly set."
+    limitation: "Still no container, Wasmtime, or microVM isolation boundary. Child process and Node permission mode are best-effort hardening only."
+    evidence:
+      - "Plugin runner lifecycle hardened."
+      - "PATH and broad inherited environment removed from worker env."
+      - "Additional Node surfaces blocked: worker_threads, dgram, http2, raw net.Socket, VM APIs, process.dlopen, process.kill, DNS, inspector, cluster, child_process, and expanded fs mutation APIs."
+      - "MCP_EXTERNAL_PLUGIN_NODE_PERMISSION is opt-in and reports node-permission-best-effort."
+    remaining:
+      - "No OS/runtime sandbox boundary yet."
+      - "Implement container/microVM/WASM runner with egress allowlist, read-only mount, seccomp/AppArmor or equivalent syscall boundary, CPU/memory quotas, and artifact egress policy."
+    owner_hint: runtime-security
+
+  DEBT-002-crypto-erasure:
+    status: implemented
+    urgency: resolved
+    current_control: "smcp:v4:kms envelope shipped (2026-06-14). Four KMS providers: LocalKeyRegistry (dev/test), VaultKeyRegistry (immediate erasure), AwsKmsKeyRegistry (2-phase: DisableKey immediate + ScheduleKeyDeletion 7d pending), GcpKmsKeyRegistry (DESTROY_SCHEDULED immediate + 24h permanent deletion). CachingKeyRegistry decorator adds bounded in-memory DEK cache (TTL+use-count, DEK zeroed on eviction) and durable CryptoErasureReceipt persistence via FileAuditStore (JSONL append, survives process restart). migrate_encryption.ts extended to re-encrypt all pre-v4 formats (legacy/v2/v3) → smcp:v4:kms when KMS_PROVIDER is set. ITenantKeyRegistry, EncryptionService, runtime.ts, factory.ts all updated. Production guard requires KMS_PROVIDER=vault|aws-kms|gcp-kms."
+    limitation: "AWS KMS has a mandatory 7-day pending deletion window; Phase 1 DisableKey gives immediate GDPR erasure, Phase 2 ScheduleKeyDeletion provides cryptographic proof after 7 days. GCP has a 24h default pending window (DESTROY_SCHEDULED state is immediately unusable). V3 HKDF blobs still require one migration run of migrate_encryption.ts before erasure SLA can be offered."
+    evidence:
+      - "src/storage/providers/local_key_registry.ts — 8 tests pass"
+      - "src/storage/providers/vault_key_registry.ts — 6 tests pass"
+      - "src/storage/providers/aws_kms_key_registry.ts — type-checked, no unit tests (requires live AWS)"
+      - "src/storage/providers/gcp_kms_key_registry.ts — 10 tests pass (fetch mock)"
+      - "src/storage/caching_key_registry.ts — 11 tests pass (DEK cache + audit store)"
+      - "src/storage/audit_store.ts — 8 tests pass (FileAuditStore + NoopAuditStore)"
+      - "src/__tests__/encryption_kms.test.ts — 6 v4 path tests pass"
+      - "docs/superpowers/adrs/2026-06-14-debt-002-kms-crypto-erasure.md"
+    remaining:
+      - "Run migrate_encryption.ts --driver fs|redis --tenant <id> for each tenant before offering erasure SLA. Requires KMS_PROVIDER set and MCP_ENCRYPTION_KEY present for V3 HKDF decrypt."
+      - "Add AwsKmsKeyRegistry unit tests (requires live AWS KMS or AWS KMS local mock like LocalStack)."
+    owner_hint: storage-security
+
+  DEBT-003-native-mcp-tasks:
+    status: monitoring
+    urgency: monitor
+    current_control: "Custom adapter supports tasks/get, tasks/update, tasks/cancel, input_required, inputRequests, and inputResponses."
+    limitation: "Private SDK hooks remain intentionally isolated in src/mcp/adapter until the SDK exposes a stable public Tasks API."
+    evidence:
+      - "docs/tasks-sdk-monitoring.md"
+      - "docs/mcp-tasks-conformance.md"
+    remaining:
+      - "No migration until public SDK API passes conformance without _requestHandlers or _createRegisteredTool."
+    owner_hint: protocol
+
+  DEBT-004-oauth-resource-indicator:
+    status: implemented
+    urgency: resolved
+    current_control: "SUPER-MCP is a Resource Server. MCP_RESOURCE_URI is enforced against aud/resource claims in JWT secret and OIDC JWKS modes when configured. Protected resource metadata route is not duplicated."
+    limitation: "PKCE and TokenManager are intentionally absent because they belong to OAuth clients, not this resource server."
+    evidence:
+      - "auth_resource_indicator tests cover aud string, aud array, resource claim, mismatch rejection, no-op when unset, and expired-token rejection."
+      - "No server-side PKCE or TokenManager was added."
+    remaining:
+      - "Future OAuth client flows must be separate from this resource-server path."
+    owner_hint: auth
+
+  DEBT-005-output-firewall-coverage:
+    status: partially_resolved
+    urgency: monitor
+    current_control: "Output firewall now redacts structuredContent recursively, preserves shape, avoids input mutation, caps depth/nodes/string budgets, handles cycles, validates SSN before redaction, and keeps email/phone redaction opt-in via strict PII mode."
+    limitation: "No DLP/classifier backend; deterministic credentials_only mode remains default."
+    evidence:
+      - "structuredContent recursive redaction"
+      - "depth/node/string/cycle budget tests"
+      - "structured-only telemetry signal through violations"
+      - "email not redacted by default; strict mode redacts email"
+    remaining:
+      - "No fake DLP. Add a real backend only for deployments with explicit DLP policy."
+    owner_hint: data-safety
+
+  DEBT-006-redis-trauma-registry:
+    status: implemented
+    urgency: resolved
+    current_control: "Memory and Redis rate limiters use bounded violation records with severity EMA and exponential backoff."
+    limitation: "Backoff policy is deterministic and conservative; not tuned from production incident data."
+    owner_hint: reliability
