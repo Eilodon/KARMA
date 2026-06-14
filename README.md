@@ -297,7 +297,7 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm build
 pnpm test:enterprise
-npm audit --audit-level=high
+pnpm audit --audit-level=high
 ```
 
 Development server:
@@ -1321,8 +1321,8 @@ Current package scripts:
   "lint:fix": "eslint src --fix",
   "lint:strict": "eslint src --max-warnings 0",
   "ci": "pnpm typecheck && pnpm lint && pnpm test",
-  "audit": "npm audit --audit-level=high",
-  "deps:check": "npm outdated",
+  "audit": "pnpm audit --audit-level=high",
+  "deps:check": "pnpm outdated",
   "migrate:encryption": "tsx src/scripts/migrate_encryption.ts",
   "test:enterprise": "vitest run src/__tests__/task_runtime.test.ts src/__tests__/task_store.test.ts src/__tests__/http_tasks_conformance.test.ts src/__tests__/jwt_auth_runtime.test.ts src/__tests__/request_context_security.test.ts src/__tests__/env_validation.test.ts src/__tests__/auth_resource_indicator.test.ts src/__tests__/oidc_auth.test.ts src/__tests__/scope_enforcement.test.ts src/__tests__/http_security.test.ts src/__tests__/protocol_header.test.ts src/__tests__/oauth_metadata.test.ts src/__tests__/rate_limit.test.ts src/__tests__/idempotency.test.ts src/__tests__/execution_lock.test.ts src/__tests__/security_policy.test.ts src/__tests__/security_regression.test.ts src/__tests__/output_firewall.test.ts src/__tests__/output_firewall_strict_pii.test.ts src/__tests__/encryption_negative.test.ts src/__tests__/vault.test.ts src/__tests__/pattern_debt.test.ts",
   "test:plugin:lifecycle": "vitest run src/__tests__/plugin_external_runner.test.ts -t \"external plugin runner lifecycle\"",
@@ -1340,7 +1340,7 @@ pnpm build
 pnpm test:enterprise
 pnpm test:plugin:lifecycle
 pnpm test:plugin:permission
-npm audit --audit-level=high
+pnpm audit --audit-level=high
 ```
 
 Additional deep plugin hardening suite:
