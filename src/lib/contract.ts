@@ -4,8 +4,12 @@ import {
   defineChain,
   http,
   getAddress,
+  WaitForTransactionReceiptTimeoutError,
   type Account,
+  type Hash,
+  type TransactionReceipt,
 } from "viem";
+import { agentSkillRegistryAbi } from "./abi.js";
 
 /**
  * Pharos Atlantic chain + batched viem clients for the AgentSkillRegistry.
@@ -60,4 +64,72 @@ export function getContractAddress(): `0x${string}` {
     );
   }
   return getAddress(addr);
+}
+
+// ── Bounded write helper (P4.2a / D-7 / Abductive-1) ───────────────────────────
+//
+// A write must broadcast exactly once and then wait for a receipt for a BOUNDED time.
+// If the receipt does not arrive before RECEIPT_TIMEOUT_MS (< MCP_LOCK_TTL_MS), the tx is
+// still on the wire — we surface a typed `pending` outcome and the caller MUST NOT resend
+// (resending double-spends). The policy below is deliberately decoupled from viem so it can
+// be unit-tested; `writeContractBounded` wires the real clients (exercised live in P7).
+
+export type WriteOutcome =
+  | { status: "confirmed"; hash: Hash; receipt: TransactionReceipt }
+  | { status: "pending"; hash: Hash };
+
+export interface BoundedWriteOps {
+  /** Static-call the tx; returns the prepared request (throws on revert before any broadcast). */
+  simulate: () => Promise<{ request: unknown }>;
+  /** Broadcast the prepared request; called AT MOST ONCE. */
+  write: (request: unknown) => Promise<Hash>;
+  /** Wait for the receipt, rejecting with WaitForTransactionReceiptTimeoutError on timeout. */
+  waitReceipt: (hash: Hash, timeoutMs: number) => Promise<TransactionReceipt>;
+}
+
+export async function runBoundedWrite(
+  ops: BoundedWriteOps,
+  timeoutMs: number,
+): Promise<WriteOutcome> {
+  const { request } = await ops.simulate();
+  const hash = await ops.write(request); // single broadcast
+  try {
+    const receipt = await ops.waitReceipt(hash, timeoutMs);
+    return { status: "confirmed", hash, receipt };
+  } catch (err) {
+    if (err instanceof WaitForTransactionReceiptTimeoutError) {
+      // Tx is broadcast; the lock may be near expiry. Hand back `pending`, never resend.
+      return { status: "pending", hash };
+    }
+    throw err; // reverts and all other errors propagate
+  }
+}
+
+/** Production wiring of runBoundedWrite over the real Pharos clients. */
+export async function writeContractBounded(
+  account: Account,
+  call: { functionName: string; args: readonly unknown[]; value?: bigint },
+  timeoutMs: number = RECEIPT_TIMEOUT_MS,
+): Promise<WriteOutcome> {
+  const publicClient = getPublicClient();
+  const walletClient = getWalletClient(account);
+  const address = getContractAddress();
+  return runBoundedWrite(
+    {
+      simulate: async () => {
+        const { request } = await publicClient.simulateContract({
+          address,
+          abi: agentSkillRegistryAbi,
+          functionName: call.functionName,
+          args: call.args,
+          value: call.value,
+          account,
+        } as never);
+        return { request };
+      },
+      write: (request) => walletClient.writeContract(request as never),
+      waitReceipt: (hash, t) => publicClient.waitForTransactionReceipt({ hash, timeout: t }),
+    },
+    timeoutMs,
+  );
 }
