@@ -1,0 +1,151 @@
+import MiniSearch from "minisearch";
+import type { SkillDocument } from "./types.js";
+
+/**
+ * In-process BM25 skill discovery index (Layer 2).
+ *
+ * MiniSearch over (name, description), updated incrementally from contract events
+ * (SkillRegistered → upsert, SkillDeactivated → discard). Ranking blends text relevance
+ * with on-chain reputation via boostDocument. price_per_call_wei stays a string everywhere
+ * (D-6 — BigInt-safe) and price/reputation filters compare with BigInt/Number, never coercing
+ * a uint256 through a JS number. Indexed text is sanitized so a skill's attacker-controlled
+ * name/description cannot smuggle hidden instructions to a discovering agent (Abductive-2).
+ *
+ * Singleton — safe only because karma.tool runs in-process (D-1).
+ */
+
+const STORE_FIELDS = [
+  "skill_id",
+  "name",
+  "description",
+  "mcp_endpoint",
+  "price_per_call_wei",
+  "reputation_score",
+  "owner_address",
+  "active",
+] as const;
+
+/** True for control / zero-width / bidi-override / BOM code points (tab/newline/CR excepted). */
+function isDangerous(x: number): boolean {
+  if (x === 0x09 || x === 0x0a || x === 0x0d) return false; // keep real whitespace
+  return (
+    x < 0x20 ||
+    x === 0x7f ||
+    (x >= 0x200b && x <= 0x200f) ||
+    (x >= 0x202a && x <= 0x202e) ||
+    x === 0x2060 ||
+    x === 0xfeff
+  );
+}
+
+/** Strip dangerous code points, collapse whitespace, cap length. */
+export function sanitizeText(input: string): string {
+  let out = "";
+  for (const ch of input) {
+    if (!isDangerous(ch.codePointAt(0) ?? 0)) out += ch;
+  }
+  return out.replace(/\s+/g, " ").trim().slice(0, 2000);
+}
+
+function sanitizeDoc(doc: SkillDocument): SkillDocument {
+  return {
+    ...doc,
+    id: doc.skill_id,
+    name: sanitizeText(doc.name),
+    description: sanitizeText(doc.description),
+  };
+}
+
+export interface SkillSearchHit {
+  skill_id: number;
+  name: string;
+  description: string;
+  mcp_endpoint: string;
+  price_per_call_wei: string;
+  reputation_score: number;
+  owner_address: string;
+  score: number;
+}
+
+export interface SkillSearchOptions {
+  maxPriceWei?: bigint;
+  minReputation?: number;
+  limit?: number;
+}
+
+export class BM25SkillIndex {
+  private readonly ms: MiniSearch<SkillDocument>;
+
+  constructor() {
+    this.ms = new MiniSearch<SkillDocument>({
+      idField: "id",
+      fields: ["name", "description"],
+      storeFields: [...STORE_FIELDS],
+      searchOptions: { prefix: true, fuzzy: 0.2, boost: { name: 2 } },
+    });
+  }
+
+  /** Add or replace a skill (idempotent — keyed by skill_id). */
+  upsert(doc: SkillDocument): void {
+    const clean = sanitizeDoc(doc);
+    if (this.ms.has(clean.id)) this.ms.replace(clean);
+    else this.ms.add(clean);
+  }
+
+  /** Remove a skill from results (e.g. on SkillDeactivated). */
+  discard(skillId: number): void {
+    if (this.ms.has(skillId)) this.ms.discard(skillId);
+  }
+
+  size(): number {
+    return this.ms.documentCount;
+  }
+
+  search(query: string, opts: SkillSearchOptions = {}): SkillSearchHit[] {
+    const results = this.ms.search(query, {
+      boostDocument: (_id, _term, stored) => {
+        const rep = Number((stored as { reputation_score?: number } | undefined)?.reputation_score ?? 0);
+        return 1 + rep / 100; // reputation 0..100 → boost factor 1.0..2.0
+      },
+      filter: (r) => {
+        const row = r as unknown as SkillDocument;
+        if (!row.active) return false;
+        if (opts.minReputation != null && row.reputation_score < opts.minReputation) return false;
+        if (opts.maxPriceWei != null && BigInt(row.price_per_call_wei) > opts.maxPriceWei) return false;
+        return true;
+      },
+    });
+    const hits = results.map((r) => {
+      const row = r as unknown as SkillDocument & { score: number };
+      return {
+        skill_id: row.skill_id,
+        name: row.name,
+        description: row.description,
+        mcp_endpoint: row.mcp_endpoint,
+        price_per_call_wei: row.price_per_call_wei,
+        reputation_score: row.reputation_score,
+        owner_address: row.owner_address,
+        score: row.score,
+      };
+    });
+    return opts.limit != null ? hits.slice(0, opts.limit) : hits;
+  }
+
+  /** Cold-start: page through on-chain skills and index them all. */
+  async rebuildFromChain(
+    loadPage: (offset: number, limit: number) => Promise<SkillDocument[]>,
+    pageSize = 50,
+  ): Promise<void> {
+    let offset = 0;
+    for (;;) {
+      const page = await loadPage(offset, pageSize);
+      if (page.length === 0) break;
+      for (const d of page) this.upsert(d);
+      if (page.length < pageSize) break;
+      offset += page.length;
+    }
+  }
+}
+
+/** Module singleton — safe only because karma.tool runs in-process (D-1). */
+export const skillIndex = new BM25SkillIndex();
