@@ -4,8 +4,11 @@ import {
   defineChain,
   http,
   getAddress,
+  keccak256,
+  encodePacked,
   WaitForTransactionReceiptTimeoutError,
   type Account,
+  type Address,
   type Hash,
   type TransactionReceipt,
 } from "viem";
@@ -103,6 +106,64 @@ export async function runBoundedWrite(
     }
     throw err; // reverts and all other errors propagate
   }
+}
+
+// ── Exactly-once guard (P4.2b / Failure-Mode-1) ────────────────────────────────
+//
+// createJob() has no on-chain idempotency key, so a lost-ack retry could create a second
+// escrowed job. We derive a deterministic taskHash from (requester, skillId, nonce) — the
+// same nonce always yields the same key — store it as the Job.taskHash, and check-before-
+// write by scanning the requester's jobs for that key. No contract change needed.
+
+/** Deterministic dedup key for a job request. Same (requester, skillId, nonce) → same hash. */
+export function deriveTaskHash(requester: Address, skillId: bigint, nonce: bigint): Hash {
+  return keccak256(
+    encodePacked(["address", "uint256", "uint256"], [requester, skillId, nonce]),
+  );
+}
+
+export interface JobReader {
+  getRequesterJobs: (requester: Address) => Promise<readonly bigint[]>;
+  getJobTaskHash: (jobId: bigint) => Promise<Hash>;
+}
+
+/** Returns an existing jobId carrying `taskHash`, or null if the request is new. */
+export async function findJobByTaskHash(
+  requester: Address,
+  taskHash: Hash,
+  reader: JobReader,
+): Promise<bigint | null> {
+  const jobIds = await reader.getRequesterJobs(requester);
+  const target = taskHash.toLowerCase();
+  for (const id of jobIds) {
+    const th = await reader.getJobTaskHash(id);
+    if (th.toLowerCase() === target) return id;
+  }
+  return null;
+}
+
+/** Production JobReader over the real Pharos clients (taskHash is jobs() tuple index 3). */
+export function makeOnchainJobReader(): JobReader {
+  const publicClient = getPublicClient();
+  const address = getContractAddress();
+  return {
+    getRequesterJobs: (requester) =>
+      publicClient.readContract({
+        address,
+        abi: agentSkillRegistryAbi,
+        functionName: "getRequesterJobs",
+        args: [requester],
+      }),
+    getJobTaskHash: async (jobId) => {
+      const job = await publicClient.readContract({
+        address,
+        abi: agentSkillRegistryAbi,
+        functionName: "jobs",
+        args: [jobId],
+      });
+      return job[3]; // tuple index 3 = taskHash (bytes32)
+    },
+  };
 }
 
 /** Production wiring of runBoundedWrite over the real Pharos clients. */
