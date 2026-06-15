@@ -2,9 +2,10 @@ node_modules/
 dist/
 .env
 keystore.json
-out/
-cache/
-broadcast/
-lib/
+# Foundry artifacts (root-anchored so they never match nested dirs like src/lib)
+/out/
+/cache/
+/broadcast/
+/lib/
 .DS_Store
 .claude/

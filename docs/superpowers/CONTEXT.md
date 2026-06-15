@@ -21,4 +21,4 @@
 - [2026-06] Idempotency is UNCONDITIONAL in the pipeline (ignores idempotentHint) | repeated on-chain ops need idempotency_nonce.
 - [2026-06] viem has NO keystore-decrypt | KeystoreManager must implement Web3 Secret Storage v3 itself.
 - [2026-06] Output firewall redacts 13-19 digit Luhn-valid runs | bare wei strings can be mangled as PAYMENT_CARD.
-- [2026-06-15] LIVE-VERIFIED Pharos Atlantic: chainId=688689, gasMode=eip1559 (baseFeePerGas=1gwei), RPC https://atlantic.dplabs-internal.com reachable (block ~24.26M) | Resolves the 688688/688689 source conflict (docs.pharos.xyz stale). viem default EIP-1559 path is correct; no legacy-gas fallback needed. Evidence: scripts/check_connectivity.ts.
+- [2026-06-15] LIVE-VERIFIED Pharos Atlantic: chainId=688689, gasMode=eip1559 (baseFeePerGas=1gwei), RPC https://atlantic.dplabs-internal.com reachable (block ~24.26M) | Resolves the 688688/688689 source conflict (docs.pharos.xyz stale). viem default EIP-1559 path is correct; no legacy-gas fallback needed. Evidence: src/scripts/check_connectivity.ts.

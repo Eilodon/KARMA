@@ -63,6 +63,14 @@ export default tseslint.config(
     },
   },
 
+  // CLI entry scripts print to console by design
+  {
+    files: ["src/scripts/**/*.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
+
   // File operations dùng biến làm path là hợp lệ — paths đến từ config nội bộ, không phải user input
   {
     files: [
