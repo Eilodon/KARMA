@@ -22,7 +22,7 @@ describe("FileAuditStore", () => {
   let store: FileAuditStore;
 
   beforeEach(async () => {
-    tmpDir = await mkdtemp(join(os.tmpdir(), "super-mcp-audit-test-"));
+    tmpDir = await mkdtemp(join(os.tmpdir(), "karma-audit-test-"));
     store  = new FileAuditStore("test-project", tmpDir);
   });
 

@@ -165,7 +165,7 @@ export class GcpKmsKeyRegistry implements ITenantKeyRegistry {
 
   // Tenant-binding AAD — cross-tenant DEK substitution fails GCP decrypt
   private aad(oid: string): string {
-    return Buffer.from(`super-mcp:tenant:${oid}`).toString("base64");
+    return Buffer.from(`karma:tenant:${oid}`).toString("base64");
   }
 
   // ── Lazy resource setup ───────────────────────────────────────────────────

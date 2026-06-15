@@ -31,7 +31,7 @@ function standardJsonSchema(schema: Record<string, unknown>, kind: "input" | "ou
   return {
     "~standard": {
       version: 1,
-      vendor: "super-mcp-json-schema-2020-12",
+      vendor: "karma-json-schema-2020-12",
       validate: (value: unknown) => {
         try {
           validateJsonAgainstSchema(guarded, value, kind);
@@ -76,7 +76,7 @@ function registerToolWithExecution(
   }
 
   // SDK v2 alpha registerTool hard-codes execution.taskSupport to forbidden.
-  // SUPER-MCP owns native Tasks in the custom adapter until SDK Tasks are stable,
+  // KARMA owns native Tasks in the custom adapter until SDK Tasks are stable,
   // so actual execution metadata is exposed through tools/list override and _meta.
   server.registerTool(name, { ...config, _meta: { ...(config._meta as Record<string, unknown>), execution } }, handler as any);
 }
@@ -128,12 +128,12 @@ function setRawRequestHandler(server: McpServer, method: string, handler: Reques
     };
   }).server;
   if (!rawServer) {
-    throw new Error(`[SUPER-MCP] SDK server is unavailable; cannot register MCP method '${method}'.`);
+    throw new Error(`[KARMA] SDK server is unavailable; cannot register MCP method '${method}'.`);
   }
 
   // SDK v2 alpha's public setRequestHandler asks getRequestSchema(method) to
   // parse every request. Draft RC methods such as tasks/update may not exist in
-  // that alpha schema table yet, so SUPER-MCP installs final-target handlers
+  // that alpha schema table yet, so KARMA installs final-target handlers
   // directly at the protocol boundary. This keeps all non-SDK coupling inside
   // src/mcp/adapter and is covered by HTTP conformance tests.
   if (rawServer._requestHandlers instanceof Map) {
@@ -142,14 +142,14 @@ function setRawRequestHandler(server: McpServer, method: string, handler: Reques
   }
 
   if (!rawServer.setRequestHandler) {
-    throw new Error(`[SUPER-MCP] SDK server does not expose a request handler registry; cannot register MCP method '${method}'.`);
+    throw new Error(`[KARMA] SDK server does not expose a request handler registry; cannot register MCP method '${method}'.`);
   }
   rawServer.setRequestHandler(method, async (request: { params?: unknown }) => handler({ params: request?.params }) as any);
 }
 
 export function createMcpServer(version: string): McpServer {
   return new McpServer({
-    name: "super-mcp-server",
+    name: "karma-server",
     version,
   });
 }
@@ -230,7 +230,7 @@ export function registerDiscover<T>(server: McpServer, tools: ToolDefinition<T>[
     _meta: {
       "io.modelcontextprotocol/protocolVersion": "2026-07-28",
       "io.modelcontextprotocol/serverInfo": {
-        name: "super-mcp-server",
+        name: "karma-server",
       },
       "io.modelcontextprotocol/serverCapabilities": {
         extensions: {

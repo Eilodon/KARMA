@@ -27,7 +27,7 @@ async function pathExists(path: string): Promise<boolean> {
 function getTenantDir(tenantId: string): string {
   const readable = tenantId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48) || "tenant";
   const digest = createHash("sha256").update(tenantId).digest("hex").slice(0, 16);
-  return join(os.homedir(), ".super_mcp", "data", `${readable}_${digest}`);
+  return join(os.homedir(), ".karma", "data", `${readable}_${digest}`);
 }
 
 function blobFormat(raw: string): string {
@@ -49,12 +49,12 @@ async function migrateFs(tenantId: string, kmsActive: boolean): Promise<void> {
   const from    = blobFormat(trimmed);
 
   if (from === "v4:kms") {
-    console.error(`[SUPER-MCP] FS state for tenant '${tenantId}' is already smcp:v4:kms — no migration needed.`);
+    console.error(`[KARMA] FS state for tenant '${tenantId}' is already smcp:v4:kms — no migration needed.`);
     return;
   }
   if (from === "v2:scrypt" && !kmsActive) {
     console.error(
-      `[SUPER-MCP] FS state for tenant '${tenantId}' is smcp:v2:scrypt. ` +
+      `[KARMA] FS state for tenant '${tenantId}' is smcp:v2:scrypt. ` +
       "Set KMS_PROVIDER to migrate to smcp:v4:kms.",
     );
     return;
@@ -71,7 +71,7 @@ async function migrateFs(tenantId: string, kmsActive: boolean): Promise<void> {
   await rename(file, backup);
   await rename(tmp, file);
   console.error(
-    `[SUPER-MCP] Migrated FS state for tenant '${tenantId}' from ${from} ` +
+    `[KARMA] Migrated FS state for tenant '${tenantId}' from ${from} ` +
     `to ${blobFormat(migrated)}. Legacy backup: ${backup}`,
   );
 }
@@ -84,7 +84,7 @@ async function migrateRedis(tenantId: string, kmsActive: boolean): Promise<void>
   ]);
 
   const redis = getRedisClient();
-  const key   = `super_mcp:state:${ENV.MCP_PROJECT_ID}:${tenantId}`;
+  const key   = `karma:state:${ENV.MCP_PROJECT_ID}:${tenantId}`;
   const raw   = await redis.get(key);
   if (!raw) {
     throw new Error(`No Redis state found for tenant '${tenantId}' at key ${key}`);
@@ -92,13 +92,13 @@ async function migrateRedis(tenantId: string, kmsActive: boolean): Promise<void>
 
   const from = blobFormat(raw);
   if (from === "v4:kms") {
-    console.error(`[SUPER-MCP] Redis state for tenant '${tenantId}' is already smcp:v4:kms — no migration needed.`);
+    console.error(`[KARMA] Redis state for tenant '${tenantId}' is already smcp:v4:kms — no migration needed.`);
     await closeRedisClient();
     return;
   }
   if (from === "v2:scrypt" && !kmsActive) {
     console.error(
-      `[SUPER-MCP] Redis state for tenant '${tenantId}' is smcp:v2:scrypt. ` +
+      `[KARMA] Redis state for tenant '${tenantId}' is smcp:v2:scrypt. ` +
       "Set KMS_PROVIDER to migrate to smcp:v4:kms.",
     );
     await closeRedisClient();
@@ -127,7 +127,7 @@ async function migrateRedis(tenantId: string, kmsActive: boolean): Promise<void>
     );
   }
   console.error(
-    `[SUPER-MCP] Migrated Redis state for tenant '${tenantId}' from ${from} ` +
+    `[KARMA] Migrated Redis state for tenant '${tenantId}' from ${from} ` +
     `to ${blobFormat(migrated)}. Legacy backup key: ${legacyKey}`,
   );
 }
@@ -152,7 +152,7 @@ async function main(): Promise<void> {
     if (registry) {
       globalEncryption.setKeyRegistry(registry);
       kmsActive = true;
-      console.error(`[SUPER-MCP] KMS registry initialised (${ENV.KMS_PROVIDER}). Target format: smcp:v4:kms.`);
+      console.error(`[KARMA] KMS registry initialised (${ENV.KMS_PROVIDER}). Target format: smcp:v4:kms.`);
     }
   }
 
@@ -169,6 +169,6 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
-  console.error("[SUPER-MCP] Encryption migration failed:", error);
+  console.error("[KARMA] Encryption migration failed:", error);
   process.exit(1);
 });

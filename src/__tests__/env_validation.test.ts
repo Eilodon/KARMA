@@ -313,7 +313,7 @@ describe("env validation", () => {
         TRANSPORT_DRIVER: "http",
         MCP_AUTH_MODE: "oidc_jwks",
         MCP_JWKS_URI: "https://idp.example.com/.well-known/jwks.json",
-        MCP_JWT_AUDIENCE: "super-mcp-api",
+        MCP_JWT_AUDIENCE: "karma-api",
         ALLOWED_ORIGINS: "https://app.example.com",
         ALLOWED_HOSTS: "app.example.com",
         MCP_IDEMPOTENCY_RESULT_TTL_SECONDS: "3600",
@@ -352,7 +352,7 @@ describe("env validation", () => {
       MCP_AUTH_MODE: "oidc_jwks",
       MCP_JWKS_URI: "https://idp.example.com/.well-known/jwks.json",
       MCP_JWT_ISSUER: "https://idp.example.com",
-      MCP_JWT_AUDIENCE: "super-mcp-api",
+      MCP_JWT_AUDIENCE: "karma-api",
       ALLOWED_ORIGINS: "https://app.example.com",
       ALLOWED_HOSTS: "app.example.com",
       MCP_IDEMPOTENCY_RESULT_TTL_SECONDS: "3600",
@@ -361,7 +361,7 @@ describe("env validation", () => {
     expect(mod.ENV.MCP_AUTH_MODE).toBe("oidc_jwks");
     expect(mod.ENV.MCP_JWKS_URI).toBe("https://idp.example.com/.well-known/jwks.json");
     expect(mod.ENV.MCP_JWT_ISSUER).toBe("https://idp.example.com");
-    expect(mod.ENV.MCP_JWT_AUDIENCE).toBe("super-mcp-api");
+    expect(mod.ENV.MCP_JWT_AUDIENCE).toBe("karma-api");
   });
 
   test("rejects MCP_JWKS_URI that is not a valid URL and exits", async () => {
@@ -415,7 +415,7 @@ describe("env validation", () => {
       MCP_AUTH_MODE: "jwt",
       MCP_JWT_SECRET: "s".repeat(32),
       MCP_JWT_ISSUER: "https://idp.example.com",
-      MCP_JWT_AUDIENCE: "super-mcp-api",
+      MCP_JWT_AUDIENCE: "karma-api",
       MCP_RESOURCE_URI: "https://api.example.com/mcp",
       ENABLE_RATE_LIMIT: "true",
       ENABLE_QUOTA: "true",
@@ -440,7 +440,7 @@ describe("env validation", () => {
       MCP_AUTH_MODE: "jwt",
       MCP_JWT_SECRET: "s".repeat(32),
       MCP_JWT_ISSUER: "https://idp.example.com",
-      MCP_JWT_AUDIENCE: "super-mcp-api",
+      MCP_JWT_AUDIENCE: "karma-api",
       MCP_RESOURCE_URI: "https://api.example.com/mcp",
       MCP_ALLOW_UNLIMITED_HTTP: "true",
       ALLOWED_ORIGINS: "https://app.example.com",
@@ -467,7 +467,7 @@ describe("env validation", () => {
       MCP_AUTH_MODE: "oidc_jwks",
       MCP_JWKS_URI: "https://idp.example.com/.well-known/jwks.json",
       MCP_JWT_ISSUER: "https://idp.example.com",
-      MCP_JWT_AUDIENCE: "super-mcp-api",
+      MCP_JWT_AUDIENCE: "karma-api",
       ENABLE_RATE_LIMIT: "true",
       ENABLE_QUOTA: "true",
       ALLOWED_ORIGINS: "https://app.example.com",

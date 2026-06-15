@@ -18,17 +18,17 @@ function secretAllowlist(): Set<string> {
 
 function assertValidSecretKey(keyName: string): void {
   if (!SECRET_KEY_PATTERN.test(keyName)) {
-    throw new Error("[SUPER-MCP] Invalid secret key name. Use uppercase A-Z, 0-9, underscore only.");
+    throw new Error("[KARMA] Invalid secret key name. Use uppercase A-Z, 0-9, underscore only.");
   }
   const allowlist = secretAllowlist();
   if (ENV.MCP_SAFE_MODE && allowlist.size > 0 && !allowlist.has(keyName)) {
-    throw new Error(`[SUPER-MCP] Secret '${keyName}' is not in MCP_SECRET_ALLOWLIST.`);
+    throw new Error(`[KARMA] Secret '${keyName}' is not in MCP_SECRET_ALLOWLIST.`);
   }
 }
 
 function assertSecretWriteAllowed(): void {
   if (!ENV.MCP_ALLOW_SECRET_WRITE) {
-    throw new Error("[SUPER-MCP] Secret writes are disabled. Set MCP_ALLOW_SECRET_WRITE=true only in controlled admin workflows.");
+    throw new Error("[KARMA] Secret writes are disabled. Set MCP_ALLOW_SECRET_WRITE=true only in controlled admin workflows.");
   }
 }
 
@@ -36,7 +36,7 @@ function tenantEnvKey(keyName: string): string {
   // B-7.1 fix: namespace env-var lookups by tenant so tenant A cannot read tenant B's secrets.
   const ctx = getRequestContext();
   const safeId = ctx.tenantId.toUpperCase().replace(/[^A-Z0-9]/g, "_");
-  return `SMCP_${safeId}_${keyName}`;
+  return `KARMA_${safeId}_${keyName}`;
 }
 
 class LocalEnvVault implements ICredentialVault {
@@ -61,7 +61,7 @@ class RedisKmsVault implements ICredentialVault {
 
   private getKey(keyName: string): string {
     const ctx = getRequestContext();
-    return `super_mcp:vault:${ENV.MCP_PROJECT_ID}:${ctx.tenantId}:${keyName}`;
+    return `karma:vault:${ENV.MCP_PROJECT_ID}:${ctx.tenantId}:${keyName}`;
   }
 
   async getSecret(keyName: string): Promise<string | null> {
@@ -73,7 +73,7 @@ class RedisKmsVault implements ICredentialVault {
       const decrypted = await globalEncryption.decryptState(encrypted, ctx.tenantId);
       return typeof decrypted.secret === "string" ? decrypted.secret : null;
     } catch {
-      console.error(`[SUPER-MCP] KMS decryption failed for key ${keyName}`);
+      console.error(`[KARMA] KMS decryption failed for key ${keyName}`);
       return null;
     }
   }

@@ -46,7 +46,7 @@ describe("pattern debt registry reconciliation", () => {
   });
 
   test("registers a read-only system tool for operational debt visibility", async () => {
-    const tool = systemTools.find(entry => entry.name === "super_mcp_pattern_debt");
+    const tool = systemTools.find(entry => entry.name === "karma_pattern_debt");
     expect(tool).toBeDefined();
     expect(tool?.annotations?.readOnlyHint).toBe(true);
     expect(tool?.execution?.taskSupport).toBe("forbidden");

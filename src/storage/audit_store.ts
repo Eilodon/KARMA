@@ -16,7 +16,7 @@ export class NoopAuditStore implements IAuditStore {
 }
 
 /**
- * Appends erasure receipts as JSONL to ~/.super_mcp/audit/{projectId}/erasure-receipts.jsonl.
+ * Appends erasure receipts as JSONL to ~/.karma/audit/{projectId}/erasure-receipts.jsonl.
  * Survives process restarts; the file is append-only and mode 0600.
  */
 export class FileAuditStore implements IAuditStore {
@@ -24,7 +24,7 @@ export class FileAuditStore implements IAuditStore {
   private dirEnsured = false;
 
   constructor(projectId: string, baseDir?: string) {
-    const dir      = baseDir ?? join(os.homedir(), ".super_mcp", "audit", projectId);
+    const dir      = baseDir ?? join(os.homedir(), ".karma", "audit", projectId);
     this.filePath  = join(dir, "erasure-receipts.jsonl");
   }
 

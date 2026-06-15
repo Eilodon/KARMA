@@ -23,7 +23,7 @@ async function ensureDistBuild(): Promise<void> {
 }
 
 async function tempPluginDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "super-mcp-plugin-"));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "karma-plugin-"));
   tempDirs.push(dir);
   return dir;
 }

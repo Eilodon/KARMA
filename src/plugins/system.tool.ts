@@ -18,7 +18,7 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 const systemTools: ToolDefinition[] = [
   {
-    name: "super_mcp_pattern_debt",
+    name: "karma_pattern_debt",
     description: "Read-only report of documented pattern-debt items, implementation gates, and runtime guards.",
     inputSchema: {
       debt_id: z.enum(PATTERN_DEBT_IDS).optional().describe("Optional pattern-debt id to inspect."),
@@ -45,7 +45,7 @@ const systemTools: ToolDefinition[] = [
         content: [{
           type: "text",
           text: JSON.stringify({
-            generatedBy: "super_mcp_pattern_debt",
+            generatedBy: "karma_pattern_debt",
             guidance: "Documented debt only. Do not implement partial security boundaries without satisfying implementationGate.",
             items,
           }, null, 2),
@@ -54,10 +54,10 @@ const systemTools: ToolDefinition[] = [
     },
   },
   {
-    name: "super_mcp_ping",
-    description: "Ping server để kiểm tra trạng thái và pipeline middlewares.",
+    name: "karma_ping",
+    description: "Ping server to check status and pipeline middlewares.",
     inputSchema: {
-      message: z.string().optional().describe("Tin nhắn ping"),
+      message: z.string().optional().describe("Ping message"),
     },
     allowedPhases: ["intake", "execution", "review", "completed"],
     capabilities: [],
@@ -74,7 +74,7 @@ const systemTools: ToolDefinition[] = [
       const msg = (args as { message?: string }).message || "Pong!";
       return {
         content: [
-          { type: "text", text: `[SUPER-MCP] ${msg}` },
+          { type: "text", text: `[KARMA] ${msg}` },
           { type: "text", text: `Current Phase: ${state.phase}` },
           { type: "text", text: `State Revision: ${state.revision}` },
           { type: "text", text: `Environment: ${ENV.STORAGE_DRIVER} / ${ENV.TELEMETRY_DRIVER}` }
@@ -83,10 +83,10 @@ const systemTools: ToolDefinition[] = [
     },
   },
   {
-    name: "super_mcp_test_long_task",
+    name: "karma_test_long_task",
     description: "Test-only long-running tool for validating native MCP Tasks negotiation.",
     inputSchema: {
-      duration: z.number().min(0).max(300).optional().describe("Thời gian chạy mô phỏng (giây, tối đa 300)"),
+      duration: z.number().min(0).max(300).optional().describe("Simulated execution time (seconds, max 300)"),
     },
     allowedPhases: ["intake", "execution", "review", "completed"],
     capabilities: [],
@@ -104,12 +104,12 @@ const systemTools: ToolDefinition[] = [
       const ms = seconds * 1000;
       await abortableSleep(ms, signal);
       return {
-        content: [{ type: "text", text: `[SUPER-MCP] Task hoàn tất xuất sắc sau ${ms}ms!` }]
+        content: [{ type: "text", text: `[KARMA] Task successfully completed in ${ms}ms!` }]
       };
     }
   }
 ];
 
 export default systemTools.filter(tool => (
-  ENV.MCP_ENABLE_TEST_TOOLS || tool.name !== "super_mcp_test_long_task"
+  ENV.MCP_ENABLE_TEST_TOOLS || tool.name !== "karma_test_long_task"
 ));

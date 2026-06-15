@@ -15,14 +15,14 @@ export async function createStorage(): Promise<IStateStore> {
 
   switch (ENV.STORAGE_DRIVER) {
     case "fs":
-      console.error("[SUPER-MCP] Khởi tạo Storage Engine: Local File System (VECTOR mode)");
+      console.error("[KARMA] Initializing Storage Engine: Local File System (VECTOR mode)");
       return new LocalFSStore();
     case "redis":
-      console.error("[SUPER-MCP] Khởi tạo Storage Engine: Redis Server (Fortuna mode)");
+      console.error("[KARMA] Initializing Storage Engine: Redis Server (Fortuna mode)");
       return new RedisStore();
     case "memory":
     default:
-      console.error("[SUPER-MCP] Khởi tạo Storage Engine: In-Memory (Test mode)");
+      console.error("[KARMA] Initializing Storage Engine: In-Memory (Test mode)");
       return new MemoryStore();
   }
 }

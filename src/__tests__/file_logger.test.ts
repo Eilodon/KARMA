@@ -6,7 +6,7 @@ import { mkdtemp, rm, readdir, readFile } from "node:fs/promises";
 
 describe("FileLogger", () => {
   test("queues concurrent logs and keeps numbered backups", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "super_mcp_"));
+    const dir = await mkdtemp(join(tmpdir(), "karma_"));
     try {
       const logger = new FileLogger({ logDir: dir, maxBytes: 80, maxBackups: 2 });
 

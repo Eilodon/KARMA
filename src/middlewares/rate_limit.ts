@@ -90,7 +90,7 @@ class RedisRateLimiter implements IRateLimiter {
     if (!ENV.ENABLE_RATE_LIMIT) return { allowed: true };
 
     const now = Date.now();
-    const key = `super_mcp:ratelimit:trauma:${ENV.MCP_PROJECT_ID}:${tenantId}`;
+    const key = `karma:ratelimit:trauma:${ENV.MCP_PROJECT_ID}:${tenantId}`;
     const ttlMs = Math.max(ENV.RATE_LIMIT_WINDOW_MS * 2, 25 * 60 * 60 * 1000);
     const backoffBaseMs = 60 * 60 * 1000;
     const backoffCapMs = 24 * 60 * 60 * 1000;

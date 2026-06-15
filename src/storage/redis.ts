@@ -24,7 +24,7 @@ export class RedisStore implements IStateStore {
   ) {}
 
   private getKey(tenantId: string): string {
-    return `super_mcp:state:${ENV.MCP_PROJECT_ID}:${tenantId}`;
+    return `karma:state:${ENV.MCP_PROJECT_ID}:${tenantId}`;
   }
 
   private getBackupIndexKey(tenantId: string): string {
@@ -50,7 +50,7 @@ export class RedisStore implements IStateStore {
       }
       return state;
     } catch (err) {
-      console.error(`[SUPER-MCP] Lỗi giải mã Redis state cho tenant: ${tenantId}`);
+      console.error(`[KARMA] Failed to decrypt Redis state for tenant: ${tenantId}`);
       throw err;
     }
   }
@@ -81,7 +81,7 @@ export class RedisStore implements IStateStore {
     ) as [number, string];
 
     if (Number(result[0]) !== 1) {
-      throw new Error(`[SUPER-MCP] Redis state revision conflict for tenant ${state.tenantId}. Expected ${expectedRevision}, got ${result[1]}.`);
+      throw new Error(`[KARMA] Redis state revision conflict for tenant ${state.tenantId}. Expected ${expectedRevision}, got ${result[1]}.`);
     }
   }
 

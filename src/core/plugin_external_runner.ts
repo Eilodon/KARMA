@@ -89,7 +89,7 @@ export function execArgvForWorker(pluginPath?: string): string[] {
 export function workerEnv(): NodeJS.ProcessEnv {
   return {
     NODE_ENV: process.env.NODE_ENV || "production",
-    SUPER_MCP_PLUGIN_WORKER: "1",
+    KARMA_PLUGIN_WORKER: "1",
     MCP_EXTERNAL_PLUGIN_NETWORK_POLICY: ENV.MCP_EXTERNAL_PLUGIN_NETWORK_POLICY,
     MCP_EXTERNAL_PLUGIN_FS_POLICY: ENV.MCP_EXTERNAL_PLUGIN_FS_POLICY,
     MCP_EXTERNAL_PLUGIN_TIMEOUT_MS: String(ENV.MCP_EXTERNAL_PLUGIN_TIMEOUT_MS),
@@ -122,7 +122,7 @@ function appendCappedStderr(current: string, chunk: unknown, truncated: boolean)
 
 function makeAbortError(signal?: AbortSignal): Error {
   if (signal?.reason instanceof Error) return signal.reason;
-  const error = new Error("[SUPER-MCP] External plugin worker aborted");
+  const error = new Error("[KARMA] External plugin worker aborted");
   error.name = "AbortError";
   return error;
 }
@@ -216,7 +216,7 @@ function callWorker<T>(request: WorkerRequest, signal?: AbortSignal): Promise<T>
     };
 
     const timer = setTimeout(() => {
-      stopAndReject(new Error(`[SUPER-MCP] External plugin worker timed out after ${ENV.MCP_EXTERNAL_PLUGIN_TIMEOUT_MS}ms`));
+      stopAndReject(new Error(`[KARMA] External plugin worker timed out after ${ENV.MCP_EXTERNAL_PLUGIN_TIMEOUT_MS}ms`));
     }, ENV.MCP_EXTERNAL_PLUGIN_TIMEOUT_MS);
     timer.unref?.();
 
@@ -235,7 +235,7 @@ function callWorker<T>(request: WorkerRequest, signal?: AbortSignal): Promise<T>
         requestChildStop(child, childShutdownTimers);
         settleOnce(() => resolve(response.value as T));
       } else {
-        stopAndReject(new Error(response.error || stderr || "[SUPER-MCP] External plugin worker failed"));
+        stopAndReject(new Error(response.error || stderr || "[KARMA] External plugin worker failed"));
       }
     };
 
@@ -247,12 +247,12 @@ function callWorker<T>(request: WorkerRequest, signal?: AbortSignal): Promise<T>
       if (settled) return;
       if (code === 0) {
         clearChildShutdownTimers(childShutdownTimers);
-        settleOnce(() => reject(new Error("[SUPER-MCP] External plugin worker exited before sending a response")));
+        settleOnce(() => reject(new Error("[KARMA] External plugin worker exited before sending a response")));
         return;
       }
       const reason = code === null ? `signal ${childSignal}` : `code ${code}`;
       clearChildShutdownTimers(childShutdownTimers);
-      settleOnce(() => reject(new Error(`[SUPER-MCP] External plugin worker exited with ${reason}: ${stderr}`)));
+      settleOnce(() => reject(new Error(`[KARMA] External plugin worker exited with ${reason}: ${stderr}`)));
     };
 
     signal?.addEventListener("abort", onAbort, { once: true });

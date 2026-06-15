@@ -26,13 +26,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function assertNoRemoteRef(ref: unknown, path: string): void {
   if (typeof ref !== "string") return;
   if (REMOTE_REF_PATTERN.test(ref)) {
-    throw new Error(`[SUPER-MCP] JSON Schema remote $ref is not allowed at ${path}: ${ref}`);
+    throw new Error(`[KARMA] JSON Schema remote $ref is not allowed at ${path}: ${ref}`);
   }
 }
 
 function walkSchema(value: unknown, path: string, depth: number, options: JsonSchemaGuardOptions, counters: { defs: number; properties: number }): unknown {
   if (depth > options.maxDepth) {
-    throw new Error(`[SUPER-MCP] JSON Schema exceeds max depth ${options.maxDepth} at ${path}`);
+    throw new Error(`[KARMA] JSON Schema exceeds max depth ${options.maxDepth} at ${path}`);
   }
 
   if (Array.isArray(value)) {
@@ -48,13 +48,13 @@ function walkSchema(value: unknown, path: string, depth: number, options: JsonSc
     if (key === "$defs" && isObject(nested)) {
       counters.defs += Object.keys(nested).length;
       if (counters.defs > options.maxDefs) {
-        throw new Error(`[SUPER-MCP] JSON Schema exceeds max $defs count ${options.maxDefs}`);
+        throw new Error(`[KARMA] JSON Schema exceeds max $defs count ${options.maxDefs}`);
       }
     }
     if (key === "properties" && isObject(nested)) {
       counters.properties += Object.keys(nested).length;
       if (counters.properties > options.maxProperties) {
-        throw new Error(`[SUPER-MCP] JSON Schema exceeds max object property count ${options.maxProperties}`);
+        throw new Error(`[KARMA] JSON Schema exceeds max object property count ${options.maxProperties}`);
       }
     }
     next[key] = walkSchema(nested, childPath, depth + 1, options, counters);
@@ -69,7 +69,7 @@ function walkSchema(value: unknown, path: string, depth: number, options: JsonSc
 
 export function guardJsonSchema202012(schema: unknown, role: "input" | "output", options: JsonSchemaGuardOptions = DEFAULT_JSON_SCHEMA_GUARD): Record<string, unknown> {
   if (!isObject(schema)) {
-    throw new Error(`[SUPER-MCP] ${role} schema must be a JSON object`);
+    throw new Error(`[KARMA] ${role} schema must be a JSON object`);
   }
   const guarded = walkSchema(schema, "#", 0, options, { defs: 0, properties: 0 });
   return {
@@ -97,7 +97,7 @@ function getAjv(): any {
     strict: false,
     validateFormats: false,
     loadSchema: async (uri: string) => {
-      throw new Error(`[SUPER-MCP] JSON Schema external load is disabled: ${uri}`);
+      throw new Error(`[KARMA] JSON Schema external load is disabled: ${uri}`);
     },
   });
   return cachedAjv;
@@ -126,12 +126,12 @@ export function validateJsonAgainstSchema(schema: Record<string, unknown>, value
   const valid = validate(value);
   const elapsed = Date.now() - started;
   if (elapsed > options.timeoutMs) {
-    throw new Error(`[SUPER-MCP] ${role} JSON Schema validation exceeded ${options.timeoutMs}ms`);
+    throw new Error(`[KARMA] ${role} JSON Schema validation exceeded ${options.timeoutMs}ms`);
   }
   if (!valid) {
     const errors = (validate.errors || [])
       .slice(0, options.maxErrors)
       .map((error: any) => `${error.instancePath || "#"}: ${error.message || error.keyword}`);
-    throw new Error(`[SUPER-MCP] ${role} JSON Schema validation failed: ${errors.join("; ")}`);
+    throw new Error(`[KARMA] ${role} JSON Schema validation failed: ${errors.join("; ")}`);
   }
 }

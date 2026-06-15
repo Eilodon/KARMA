@@ -1,10 +1,10 @@
-# SUPER-MCP
+# KARMA
 
-**SUPER-MCP** is a hardened TypeScript / ESM boilerplate for building production-oriented [Model Context Protocol](https://modelcontextprotocol.io/) servers. It provides stdio and stateless HTTP transports, native Tasks-style long-running execution, durable storage, authentication, request governance, output redaction, plugin loading controls, and explicit runtime debt reporting.
+**KARMA** is the first use case of **SUPER-MCP** — a hardened TypeScript / ESM framework for building production-oriented [Model Context Protocol](https://modelcontextprotocol.io/) servers. It provides stdio and stateless HTTP transports, native Tasks-style long-running execution, durable storage, authentication, request governance, output redaction, plugin loading controls, and explicit runtime debt reporting.
 
 This README reflects the current patched codebase in this package.
 
-> Package: `super-mcp-boilerplate`  
+> Package: `karma`  
 > Runtime entrypoint: `dist/index.js`  
 > Default transport: `stdio`  
 > Default protocol mode: `rc2026` only  
@@ -13,14 +13,14 @@ This README reflects the current patched codebase in this package.
 > Production storage requirement: Redis  
 > Production HTTP auth requirement: JWT or OIDC JWKS, not API key
 
-SUPER-MCP intentionally does **not** claim to provide a true security sandbox for untrusted plugins or a completed crypto-erasure runtime. Those are tracked as release-blocking epics until implemented with real container/microVM/WASM and KMS-backed primitives.
+KARMA intentionally does **not** claim to provide a true security sandbox for untrusted plugins or a completed crypto-erasure runtime. Those are tracked as release-blocking epics until implemented with real container/microVM/WASM and KMS-backed primitives.
 
 ---
 
 ## Table of contents
 
 1. [Current status](#current-status)
-2. [What SUPER-MCP provides](#what-super-mcp-provides)
+2. [What KARMA provides](#what-karma-provides)
 3. [Architecture](#architecture)
 4. [Repository layout](#repository-layout)
 5. [Requirements](#requirements)
@@ -71,7 +71,7 @@ Known residual gaps are documented in `docs/pattern-debt-registry.yaml` and expo
 
 ---
 
-## What SUPER-MCP provides
+## What KARMA provides
 
 Core runtime capabilities:
 
@@ -98,7 +98,7 @@ Explicit non-claims:
 - The external Node child-process plugin runner is **best-effort hardening**, not a true OS/container/microVM sandbox.
 - Node Permission Model support is optional and also best-effort.
 - KMS-backed crypto-erasure is implemented via the `smcp:v4:kms` envelope and four providers (Local/Vault/AWS KMS/GCP KMS). AWS KMS has a mandatory 7-day pending-deletion window; immediate erasure is via `DisableKey` only. Run `migrate_encryption.ts` once per tenant to re-encrypt pre-V4 blobs before offering erasure SLA.
-- SUPER-MCP is an OAuth Resource Server; it does not implement client-side PKCE or TokenManager flows.
+- KARMA is an OAuth Resource Server; it does not implement client-side PKCE or TokenManager flows.
 
 ---
 
@@ -343,9 +343,9 @@ Example client config:
 ```json
 {
   "mcpServers": {
-    "super-mcp": {
+    "karma": {
       "command": "node",
-      "args": ["/absolute/path/to/SUPER-MCP/dist/index.js"],
+      "args": ["/absolute/path/to/KARMA/dist/index.js"],
       "env": {
         "TRANSPORT_DRIVER": "stdio",
         "STORAGE_DRIVER": "fs",
@@ -470,7 +470,7 @@ MCP_ENCRYPTION_KEY=base64url:<32-byte-base64url-key>
 MCP_AUTH_MODE=jwt
 MCP_JWT_SECRET=<at-least-32-chars>
 MCP_JWT_ISSUER=https://idp.example.com
-MCP_JWT_AUDIENCE=super-mcp-api
+MCP_JWT_AUDIENCE=karma-api
 MCP_RESOURCE_URI=https://api.example.com/mcp
 MCP_AUTHORIZATION_SERVERS=https://idp.example.com
 
@@ -502,7 +502,7 @@ MCP_AUTH_MODE=oidc_jwks
 MCP_JWKS_URI=https://idp.example.com/.well-known/jwks.json
 MCP_JWKS_ALLOWLIST=idp.example.com
 MCP_JWT_ISSUER=https://idp.example.com
-MCP_JWT_AUDIENCE=super-mcp-api
+MCP_JWT_AUDIENCE=karma-api
 MCP_RESOURCE_URI=https://api.example.com/mcp
 MCP_AUTHORIZATION_SERVERS=https://idp.example.com
 
@@ -524,7 +524,7 @@ Use `MCP_ALLOW_UNLIMITED_HTTP=true` only as a documented production risk waiver.
 
 ## MCP protocol behavior
 
-SUPER-MCP targets the local final architecture documented in `docs/adr/0001-mcp-2026-07-28-final-architecture.md`.
+KARMA targets the local final architecture documented in `docs/adr/0001-mcp-2026-07-28-final-architecture.md`.
 
 Protocol decisions implemented in this codebase:
 
@@ -595,7 +595,7 @@ Local/dev JWT can omit issuer, audience, and resource URI, but production HTTP r
 MCP_AUTH_MODE=jwt
 MCP_JWT_SECRET=<at-least-32-chars>
 MCP_JWT_ISSUER=https://idp.example.com
-MCP_JWT_AUDIENCE=super-mcp-api
+MCP_JWT_AUDIENCE=karma-api
 MCP_RESOURCE_URI=https://api.example.com/mcp
 ```
 
@@ -622,7 +622,7 @@ Required in HTTP mode:
 MCP_AUTH_MODE=oidc_jwks
 MCP_JWKS_URI=https://idp.example.com/.well-known/jwks.json
 MCP_JWT_ISSUER=https://idp.example.com
-MCP_JWT_AUDIENCE=super-mcp-api
+MCP_JWT_AUDIENCE=karma-api
 MCP_RESOURCE_URI=https://api.example.com/mcp
 ```
 
@@ -648,7 +648,7 @@ The `stdio` context skips per-tool scope enforcement by design as it is intended
 
 ## Native Tasks
 
-SUPER-MCP supports native Tasks-style long-running execution through the current local adapter.
+KARMA supports native Tasks-style long-running execution through the current local adapter.
 
 Supported methods:
 
@@ -1124,7 +1124,7 @@ Host and CORS:
 Build the image:
 
 ```bash
-docker build -f Containerfile -t super-mcp:local .
+docker build -f Containerfile -t karma:local .
 ```
 
 The image sets `NODE_ENV=production`, so production gates apply.
@@ -1148,7 +1148,7 @@ MCP_IDEMPOTENCY_SECRET=change-this-idempotency-secret-at-least-32-chars
 MCP_AUTH_MODE=jwt
 MCP_JWT_SECRET=change-this-jwt-secret-with-at-least-32-chars
 MCP_JWT_ISSUER=https://idp.example.com
-MCP_JWT_AUDIENCE=super-mcp-api
+MCP_JWT_AUDIENCE=karma-api
 MCP_RESOURCE_URI=https://api.example.com/mcp
 MCP_AUTHORIZATION_SERVERS=https://idp.example.com
 
@@ -1246,7 +1246,7 @@ All configuration is read in `src/config/env.ts`.
 | `TELEMETRY_DRIVER` | `stderr` in stdio, otherwise `file` | `file`, `stdout`, `stderr`. `stdout` forbidden with stdio. |
 | `MCP_TELEMETRY_MAX_BYTES` | `1048576` | File logger rotation size. |
 | `MCP_TELEMETRY_MAX_BACKUPS` | `5` | File logger backup count. |
-| `OTEL_SERVICE_NAME` | `super-mcp-server` | OTEL service name. |
+| `OTEL_SERVICE_NAME` | `karma-server` | OTEL service name. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Enables OTLP export when configured. |
 
 ### Abuse controls
@@ -1393,7 +1393,7 @@ Additional suites (run via `pnpm test` or individually):
 
 ## Pattern debt and limitations
 
-SUPER-MCP keeps residual security/design debt visible instead of hiding it.
+KARMA keeps residual security/design debt visible instead of hiding it.
 
 Runtime report tool:
 

@@ -99,7 +99,7 @@ type RedisTaskClient = {
 };
 
 const TASK_ID_PATTERN = /^task_[0-9a-f]{16}$/;
-const TASK_ID_COLLISION = "__SUPER_MCP_TASK_ID_COLLISION__";
+const TASK_ID_COLLISION = "__KARMA_TASK_ID_COLLISION__";
 
 /** Generates a public task handle like "task_3f9a1b2c4d5e6f7a". */
 function generateTaskId(): string {
@@ -129,7 +129,7 @@ function cloneRecord(record: TaskHandleRecord): TaskHandleRecord {
 }
 
 function taskStorePrefix(): string {
-  return `super_mcp:tasks:${ENV.MCP_PROJECT_ID}:`;
+  return `karma:tasks:${ENV.MCP_PROJECT_ID}:`;
 }
 
 function hashIdempotencyKey(idempotencyKey: string): string {
@@ -410,7 +410,7 @@ export class RedisTaskStore implements TaskStore {
       const parsed = this.parseRecord(raw);
       if (parsed) return parsed;
     }
-    throw new Error("[SUPER-MCP] Failed to allocate a unique task_id after retries.");
+    throw new Error("[KARMA] Failed to allocate a unique task_id after retries.");
   }
 
   async getTask(taskId: string): Promise<TaskHandleRecord | null> {
@@ -500,11 +500,11 @@ export class RedisTaskStore implements TaskStore {
       redis.call('SETEX', KEYS[1], ttl, encoded)
       return ARGV[10] .. requestKey .. ':' .. encoded
     `;
-    const notFound = "__SUPER_MCP_CONSUME_NOT_FOUND__";
-    const notInputRequired = "__SUPER_MCP_CONSUME_NOT_INPUT_REQUIRED__:";
-    const missingInputRequest = "__SUPER_MCP_CONSUME_MISSING_INPUT_REQUEST__:";
-    const staleInputRequest = "__SUPER_MCP_CONSUME_STALE_INPUT_REQUEST__:";
-    const consumed = "__SUPER_MCP_CONSUME_OK__:";
+    const notFound = "__KARMA_CONSUME_NOT_FOUND__";
+    const notInputRequired = "__KARMA_CONSUME_NOT_INPUT_REQUIRED__:";
+    const missingInputRequest = "__KARMA_CONSUME_MISSING_INPUT_REQUEST__:";
+    const staleInputRequest = "__KARMA_CONSUME_STALE_INPUT_REQUEST__:";
+    const consumed = "__KARMA_CONSUME_OK__:";
     const raw = await this.redis.eval(
       script,
       1,

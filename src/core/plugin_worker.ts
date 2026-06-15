@@ -57,7 +57,7 @@ type WorkerResponse = {
 };
 
 function blockedApi(name: string): never {
-  throw new Error(`[SUPER-MCP] External plugin guard blocked ${name}. Configure an external container/microVM runner if the plugin needs this capability.`);
+  throw new Error(`[KARMA] External plugin guard blocked ${name}. Configure an external container/microVM runner if the plugin needs this capability.`);
 }
 
 function patchExport(target: unknown, key: string, replacement: unknown): void {
@@ -285,7 +285,7 @@ async function loadTools(pluginPath: string): Promise<ToolDefinition<any>[]> {
     const module = await import(pluginPath);
     const pluginTools = module.default || module.tools;
     if (!Array.isArray(pluginTools)) {
-      throw new Error(`[SUPER-MCP] External plugin '${pluginPath}' does not export ToolDefinition[].`);
+      throw new Error(`[KARMA] External plugin '${pluginPath}' does not export ToolDefinition[].`);
     }
     return pluginTools;
   } finally {
@@ -302,7 +302,7 @@ process.on("message", async (request: WorkerRequest) => {
     }
 
     const tool = tools.find(candidate => candidate.name === request.toolName);
-    if (!tool) throw new Error(`[SUPER-MCP] External plugin tool not found: ${request.toolName}`);
+    if (!tool) throw new Error(`[KARMA] External plugin tool not found: ${request.toolName}`);
 
     const state = request.state as any;
     const result = await tool.handler(request.args, state, undefined, {

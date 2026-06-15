@@ -69,7 +69,7 @@ function ensureToolPolicy<T>(tool: ToolDefinition<T>): void {
   if (!ENV.MCP_SAFE_MODE) return;
   const blocked = (tool.capabilities || []).filter(capability => SAFE_MODE_BLOCKED_CAPABILITIES.has(capability));
   if (blocked.length > 0) {
-    throw new Error(`[SUPER-MCP] MCP_SAFE_MODE blocked tool '${tool.name}' because it declares capabilities: ${blocked.join(",")}`);
+    throw new Error(`[KARMA] MCP_SAFE_MODE blocked tool '${tool.name}' because it declares capabilities: ${blocked.join(",")}`);
   }
 }
 
@@ -94,7 +94,7 @@ function validateConfidence<T>(tool: ToolDefinition<T>, args: unknown): void {
     !hasObservableSignal
   ) {
     throw new ElicitationRequiredException({
-      message: `AI Confidence (${confidence}) is below threshold or reasoning lacks concrete observable safety signals. Cần người dùng xác nhận thủ công.`
+      message: `AI Confidence (${confidence}) is below threshold or reasoning lacks concrete observable safety signals. Manual user confirmation required.`
     });
   }
 }
@@ -108,7 +108,7 @@ function validateScopes<T>(tool: ToolDefinition<T>, scopes: string[], authType: 
   const granted = new Set(scopes);
   const missing = required.filter(scope => !granted.has(scope));
   if (missing.length > 0) {
-    throw new Error(`[SUPER-MCP] Missing required scope(s): ${missing.join(",")}`);
+    throw new Error(`[KARMA] Missing required scope(s): ${missing.join(",")}`);
   }
 }
 
@@ -121,7 +121,7 @@ function combineSignal(parent: AbortSignal | undefined, timeoutMs: number): { si
   let timeoutHandle: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
     timeoutHandle = setTimeout(() => {
-      const err = new Error(`[SUPER-MCP] Tool timed out after ${timeoutMs}ms`);
+      const err = new Error(`[KARMA] Tool timed out after ${timeoutMs}ms`);
       controller.abort(err);
       reject(err);
     }, timeoutMs);
@@ -179,14 +179,14 @@ function sanitizeResult(rawResult: ToolResult): { result: ToolResult; wasTruncat
         const parsed = JSON.parse(c.text);
         if (Array.isArray(parsed)) {
           const sliced = parsed.slice(0, 100);
-          return { ...c, text: JSON.stringify(sliced, null, 2) + "\n\n--- [SUPER-MCP WARNING: JSON ARRAY TRUNCATED TO 100 ITEMS TO SAVE TOKENS] ---" };
+          return { ...c, text: JSON.stringify(sliced, null, 2) + "\n\n--- [KARMA WARNING: JSON ARRAY TRUNCATED TO 100 ITEMS TO SAVE TOKENS] ---" };
         }
       } catch {
         // Fallback to string truncation
       }
       return {
         ...c,
-        text: c.text.substring(0, MAX_PAYLOAD_SIZE) + "\n\n--- [SUPER-MCP WARNING: PAYLOAD TRUNCATED - DUPLICATED/EXCESSIVE DATA REMOVED. RESULTS MAY BE INCOMPLETE] ---"
+        text: c.text.substring(0, MAX_PAYLOAD_SIZE) + "\n\n--- [KARMA WARNING: PAYLOAD TRUNCATED - DUPLICATED/EXCESSIVE DATA REMOVED. RESULTS MAY BE INCOMPLETE] ---"
       };
     }
     return c;
@@ -278,7 +278,7 @@ function startIdempotencyHeartbeat(idempotencyKey: string): () => void {
   const intervalMs = Math.max(1000, Math.floor(ENV.MCP_IDEMPOTENCY_WORKING_TTL_SECONDS * 1000 / 3));
   const timer = setInterval(() => {
     globalIdempotencyManager.extendWorking?.(idempotencyKey).catch(error => {
-      console.error("[SUPER-MCP] Failed to extend idempotency working TTL:", error);
+      console.error("[KARMA] Failed to extend idempotency working TTL:", error);
     });
   }, intervalMs);
   return () => clearInterval(timer);
@@ -292,7 +292,7 @@ async function waitForTaskStoreInput(
 ): Promise<unknown> {
   while (!signal?.aborted) {
     const task = await globalTaskStore.getTask(taskId);
-    if (!task) throw new Error(`[SUPER-MCP] Task ${taskId} expired while waiting for input.`);
+    if (!task) throw new Error(`[KARMA] Task ${taskId} expired while waiting for input.`);
     if (task.status === "cancelled") throw new TaskCancelledError(taskId, task.cancelReason || "cancelled");
     if (task.lastClientInput?.inputRequestId === inputRequestId && task.lastClientInput.inputResponses) {
       return Object.prototype.hasOwnProperty.call(task.lastClientInput.inputResponses, requestKey)
@@ -310,13 +310,13 @@ async function applyInvocationGovernance(toolName: string, tenantId: string, req
   const rateLimitResult = await globalRateLimiter.check(tenantId);
   if (!rateLimitResult.allowed) {
     await telemetry.log("rate_limit_exceeded", { tool: toolName, tenantId, requestId });
-    throw new Error(`[SUPER-MCP] Rate limit exceeded. Vui lòng thử lại sau ${rateLimitResult.retryAfterMs}ms.`);
+    throw new Error(`[KARMA] Rate limit exceeded. Please try again in ${rateLimitResult.retryAfterMs}ms.`);
   }
 
   const quotaResult = await globalQuotaManager.check(tenantId);
   if (!quotaResult.allowed) {
     await telemetry.log("quota_exceeded", { tool: toolName, tenantId, used: quotaResult.used, requestId });
-    throw new Error(`[SUPER-MCP] Quota exceeded. Bạn đã dùng hết ${quotaResult.used} requests hôm nay.`);
+    throw new Error(`[KARMA] Quota exceeded. You have used all ${quotaResult.used} requests for today.`);
   }
 }
 
@@ -339,18 +339,18 @@ export function registerTools<T = Record<string, unknown>>(
 ): void {
   for (const tool of tools) {
     if (!tool.annotations || !tool.execution) {
-      throw new Error(`[SUPER-MCP] Tool '${tool.name}' must declare annotations and execution metadata at registration time.`);
+      throw new Error(`[KARMA] Tool '${tool.name}' must declare annotations and execution metadata at registration time.`);
     }
     assertToolPolicy(tool);
 
     if (ENV.MCP_SAFE_MODE && (tool.capabilities || []).some(c => SAFE_MODE_BLOCKED_CAPABILITIES.has(c))) {
-      console.error(`[SUPER-MCP] Tool '${tool.name}' not registered because MCP_SAFE_MODE blocks one or more declared capabilities.`);
+      console.error(`[KARMA] Tool '${tool.name}' not registered because MCP_SAFE_MODE blocks one or more declared capabilities.`);
       continue;
     }
 
     if (tool.requireConfidence) {
-      tool.inputSchema.confidence_level = z.number().min(0).max(1).describe("Độ tự tin của AI vào tính an toàn của tác vụ (0.0 đến 1.0)");
-      tool.inputSchema.reasoning = z.string().describe("Giải thích chi tiết tại sao hành động này là an toàn và không gây hại hệ thống");
+      tool.inputSchema.confidence_level = z.number().min(0).max(1).describe("AI confidence in the safety of the task (0.0 to 1.0)");
+      tool.inputSchema.reasoning = z.string().describe("Detailed explanation of why this action is safe and non-destructive to the system");
     }
 
     registerMcpTool(
@@ -447,7 +447,7 @@ export function registerTools<T = Record<string, unknown>>(
             }
             const spanMeta = await finishSpan("ERROR", { error: "duplicate_task_without_tasks_support" });
             await telemetry.log("task_duplicate_invocation", { ...telemetryBase, ...spanMeta });
-            throw new Error(`[SUPER-MCP] Tool '${tool.name}' is already running. Use tasks/get when the client supports ${"io.modelcontextprotocol/tasks"}.`);
+            throw new Error(`[KARMA] Tool '${tool.name}' is already running. Use tasks/get when the client supports ${"io.modelcontextprotocol/tasks"}.`);
           }
           const spanMeta = await finishSpan("OK", { "mcp.idempotency.cache_hit": true });
           await telemetry.log("idempotency_cache_hit", { ...telemetryBase, ...spanMeta });
@@ -460,7 +460,7 @@ export function registerTools<T = Record<string, unknown>>(
           if (globalTaskTracker.isDraining()) {
             await globalIdempotencyManager.release(idempotencyKey);
             await finishSpan("ERROR", { error: "server_draining" });
-            throw new Error("[SUPER-MCP] Server is shutting down and is not accepting new async tasks.");
+            throw new Error("[KARMA] Server is shutting down and is not accepting new async tasks.");
           }
 
           const task = await globalTaskStore.createTask({
@@ -574,7 +574,7 @@ export function registerTools<T = Record<string, unknown>>(
                 await telemetry.log("task_transient_release", { ...telemetryBase, taskId, error: String(error) });
               } else {
                 // Permanent failure: commit with a short error TTL (not the full result TTL).
-                const errorResult = makeToolErrorResult("[SUPER-MCP] Task Failed", error);
+                const errorResult = makeToolErrorResult("[KARMA] Task Failed", error);
                 await globalIdempotencyManager.commitError(
                   idempotencyKey,
                   errorResult,
@@ -597,7 +597,7 @@ export function registerTools<T = Record<string, unknown>>(
             await globalTaskStore.deleteByIdempotencyKey(idempotencyKey);
             taskController.abort(new TaskCancelledError(taskId, "server draining"));
             await finishSpan("ERROR", { taskId, error: "server_draining" });
-            throw new Error("[SUPER-MCP] Server is shutting down and is not accepting new async tasks.");
+            throw new Error("[KARMA] Server is shutting down and is not accepting new async tasks.");
           }
           const createdSpanMeta = await finishTaskLifecycleSpan(taskId, "created", "OK");
           await telemetry.log("task_created", { ...telemetryBase, ...createdSpanMeta, taskId });
@@ -607,7 +607,7 @@ export function registerTools<T = Record<string, unknown>>(
         if (taskSupport === "required") {
           await globalIdempotencyManager.release(idempotencyKey);
           await finishSpan("ERROR", { error: "client_missing_tasks_extension" });
-          throw new Error(`[SUPER-MCP] Tool '${tool.name}' requires client support for io.modelcontextprotocol/tasks.`);
+          throw new Error(`[KARMA] Tool '${tool.name}' requires client support for io.modelcontextprotocol/tasks.`);
         }
 
         return globalExecutionLockManager.withTenantLock(tenantId, async (lockSignal) => {
@@ -635,7 +635,7 @@ export function registerTools<T = Record<string, unknown>>(
             // duplicate retries do not re-run non-idempotent app logic forever.
             await globalIdempotencyManager.commitError(
               idempotencyKey,
-              makeToolErrorResult("[SUPER-MCP] Tool Failed", error),
+              makeToolErrorResult("[KARMA] Tool Failed", error),
               ENV.MCP_IDEMPOTENCY_ERROR_TTL_SECONDS,
             );
             throw error;

@@ -80,7 +80,7 @@ async function ensureOtelSdk(): Promise<void> {
     sdkAvailable = true;
   })().catch(error => {
     sdkAvailable = false;
-    console.error("[SUPER-MCP] Official OpenTelemetry SDK unavailable; trace metadata will remain JSONL-only:", error);
+    console.error("[KARMA] Official OpenTelemetry SDK unavailable; trace metadata will remain JSONL-only:", error);
   });
 
   return sdkStart;
@@ -128,7 +128,7 @@ function parentContextFromAttributes(attributes: Record<string, unknown>): { par
 
 function maybeCreateSdkSpan(span: OtelSpan): void {
   if (!sdkAvailable || span.sdkSpan) return;
-  const tracer = trace.getTracer("super-mcp-runtime");
+  const tracer = trace.getTracer("karma-runtime");
   span.sdkSpan = tracer.startSpan(
     span.name,
     {

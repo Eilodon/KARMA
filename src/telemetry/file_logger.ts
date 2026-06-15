@@ -19,7 +19,7 @@ export class FileLogger implements ITelemetryLogger {
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: { logDir?: string; maxBytes?: number; maxBackups?: number } = {}) {
-    this.logDir = options.logDir || join(os.homedir(), ".super_mcp", "logs");
+    this.logDir = options.logDir || join(os.homedir(), ".karma", "logs");
     this.logFile = join(this.logDir, "telemetry.jsonl");
     this.maxBytes = options.maxBytes || ENV.MCP_TELEMETRY_MAX_BYTES;
     this.maxBackups = options.maxBackups || ENV.MCP_TELEMETRY_MAX_BACKUPS;
@@ -28,7 +28,7 @@ export class FileLogger implements ITelemetryLogger {
   log(event: string, meta: Record<string, unknown>): Promise<void> {
     this.queue = this.queue.then(() => this.writeLog(event, meta));
     this.queue = this.queue.catch(err => {
-      console.error("[SUPER-MCP] File logger failed:", err);
+      console.error("[KARMA] File logger failed:", err);
     });
     return this.queue;
   }

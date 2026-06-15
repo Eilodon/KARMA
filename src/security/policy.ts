@@ -65,6 +65,6 @@ export function evaluateToolPolicy<T = Record<string, unknown>>(tool: ToolDefini
 export function assertToolPolicy<T = Record<string, unknown>>(tool: ToolDefinition<T>): void {
   const decision = evaluateToolPolicy(tool);
   if (!decision.allowed) {
-    throw new Error(`[SUPER-MCP] Tool '${tool.name}' rejected by security policy: ${decision.reasons.join("; ")}`);
+    throw new Error(`[KARMA] Tool '${tool.name}' rejected by security policy: ${decision.reasons.join("; ")}`);
   }
 }

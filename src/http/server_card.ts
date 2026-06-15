@@ -15,9 +15,9 @@ function toolCard(tool: ToolDefinition) {
 export function createServerCard(tools: ToolDefinition[], version: string) {
   return {
     schemaVersion: "draft",
-    name: "super-mcp-server",
-    title: "SUPER-MCP Boilerplate",
-    description: "Hardened TypeScript boilerplate for production MCP servers.",
+    name: "karma-server",
+    title: "KARMA",
+    description: "First use case of SUPER-MCP - Hardened production MCP server.",
     version,
     protocol: {
       transport: ENV.TRANSPORT_DRIVER,

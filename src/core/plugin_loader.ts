@@ -80,7 +80,7 @@ export async function assertPluginManifestStable(): Promise<void> {
   if (!ENV.MCP_PLUGIN_PIN_MANIFEST || !loadedPluginManifestHash) return;
   const current = await computePluginManifestHash(await discoverCandidatePluginFiles());
   if (current !== loadedPluginManifestHash) {
-    throw new Error("[SUPER-MCP] Plugin manifest changed after startup. Restart deliberately to accept plugin changes.");
+    throw new Error("[KARMA] Plugin manifest changed after startup. Restart deliberately to accept plugin changes.");
   }
 }
 
@@ -113,7 +113,7 @@ export class PluginLoader {
 
       const fullPath = path.resolve(pluginDir, file.name);
       if (!fullPath.startsWith(`${pluginDir}${path.sep}`)) {
-        console.error(`[SUPER-MCP] Plugin path rejected: ${file.name}`);
+        console.error(`[KARMA] Plugin path rejected: ${file.name}`);
         continue;
       }
 
@@ -121,35 +121,35 @@ export class PluginLoader {
         const expected = hashAllowlist.get(file.name);
         const actual = createHash("sha256").update(await fs.readFile(fullPath)).digest("hex");
         if (!expected || expected !== actual) {
-          console.error(`[SUPER-MCP] Plugin hash rejected: ${file.name}`);
+          console.error(`[KARMA] Plugin hash rejected: ${file.name}`);
           continue;
         }
       }
 
       if (ENV.MCP_PLUGIN_AUTO_DISCOVERY && !allowlist.has(file.name)) {
-        console.error(`[SUPER-MCP] Unsafe plugin auto-discovery loaded non-allowlisted plugin '${file.name}'.`);
+        console.error(`[KARMA] Unsafe plugin auto-discovery loaded non-allowlisted plugin '${file.name}'.`);
       }
 
       try {
         const trustedBuiltIn = isTrustedBuiltInPlugin(file.name);
         if (!trustedBuiltIn && ENV.MCP_PLUGIN_ISOLATION_MODE !== "external") {
-          console.error(`[SUPER-MCP] Non-built-in plugin '${file.name}' rejected: MCP_PLUGIN_ISOLATION_MODE=policy is trusted-only. Use MCP_PLUGIN_ISOLATION_MODE=external for third-party plugins.`);
+          console.error(`[KARMA] Non-built-in plugin '${file.name}' rejected: MCP_PLUGIN_ISOLATION_MODE=policy is trusted-only. Use MCP_PLUGIN_ISOLATION_MODE=external for third-party plugins.`);
           continue;
         }
 
         if (ENV.MCP_PLUGIN_ISOLATION_MODE === "external" && !trustedBuiltIn) {
           // MISS-3/D-5.2 fix: warn when OS sandboxing or hash pinning is absent.
           if (!ENV.MCP_EXTERNAL_PLUGIN_NODE_PERMISSION) {
-            console.error(`[SUPER-MCP] WARNING: External plugin '${file.name}' loaded without Node.js permission model (MCP_EXTERNAL_PLUGIN_NODE_PERMISSION=false). Enable --experimental-permission for OS-level sandboxing.`);
+            console.error(`[KARMA] WARNING: External plugin '${file.name}' loaded without Node.js permission model (MCP_EXTERNAL_PLUGIN_NODE_PERMISSION=false). Enable --experimental-permission for OS-level sandboxing.`);
           }
           if (hashAllowlist.size === 0) {
-            console.error(`[SUPER-MCP] WARNING: External plugin '${file.name}' loaded without MCP_PLUGIN_SHA256_ALLOWLIST. Pin expected hashes to prevent supply-chain tampering.`);
+            console.error(`[KARMA] WARNING: External plugin '${file.name}' loaded without MCP_PLUGIN_SHA256_ALLOWLIST. Pin expected hashes to prevent supply-chain tampering.`);
           }
           const metadata = await runner.describe(fullPath);
           const accepted = metadata
             .filter(tool => {
               if (!tool?.name || !tool?.description || !tool?.allowedPhases || !tool.annotations || !tool.execution) {
-                console.error(`[SUPER-MCP] Invalid external tool metadata rejected from plugin '${file.name}'.`);
+                console.error(`[KARMA] Invalid external tool metadata rejected from plugin '${file.name}'.`);
                 return false;
               }
               return true;
@@ -177,40 +177,40 @@ export class PluginLoader {
             }))
             .filter(tool => {
               if (blockedBySafeMode(tool)) {
-                console.error(`[SUPER-MCP] Safe mode blocked external tool '${tool.name}' from plugin '${file.name}' due to capabilities: ${(tool.capabilities || []).join(",")}`);
+                console.error(`[KARMA] Safe mode blocked external tool '${tool.name}' from plugin '${file.name}' due to capabilities: ${(tool.capabilities || []).join(",")}`);
                 return false;
               }
               return true;
             });
 
           tools.push(...accepted);
-          console.error(`[SUPER-MCP] External plugin loaded '${file.name}' through ${runner.isolationLevel} boundary (${accepted.length}/${metadata.length} tools accepted)`);
+          console.error(`[KARMA] External plugin loaded '${file.name}' through ${runner.isolationLevel} boundary (${accepted.length}/${metadata.length} tools accepted)`);
           continue;
         }
 
         const module = await import(`file://${fullPath}`);
         const pluginTools = module.default || module.tools;
         if (!Array.isArray(pluginTools)) {
-          console.error(`[SUPER-MCP] Plugin '${file.name}' does not export ToolDefinition[].`);
+          console.error(`[KARMA] Plugin '${file.name}' does not export ToolDefinition[].`);
           continue;
         }
 
         const accepted = pluginTools.filter((tool: ToolDefinition<T>) => {
           if (!tool?.name || !tool?.handler || !tool?.inputSchema || !tool?.allowedPhases || !tool.annotations || !tool.execution) {
-            console.error(`[SUPER-MCP] Invalid tool rejected from plugin '${file.name}'.`);
+            console.error(`[KARMA] Invalid tool rejected from plugin '${file.name}'.`);
             return false;
           }
           if (blockedBySafeMode(tool)) {
-            console.error(`[SUPER-MCP] Safe mode blocked tool '${tool.name}' from plugin '${file.name}' due to capabilities: ${(tool.capabilities || []).join(",")}`);
+            console.error(`[KARMA] Safe mode blocked tool '${tool.name}' from plugin '${file.name}' due to capabilities: ${(tool.capabilities || []).join(",")}`);
             return false;
           }
           return true;
         });
 
         tools.push(...accepted);
-        console.error(`[SUPER-MCP] Plugin loaded '${file.name}' (${accepted.length}/${pluginTools.length} tools accepted)`);
+        console.error(`[KARMA] Plugin loaded '${file.name}' (${accepted.length}/${pluginTools.length} tools accepted)`);
       } catch (error) {
-        console.error(`[SUPER-MCP] Plugin load error at '${file.name}':`, error);
+        console.error(`[KARMA] Plugin load error at '${file.name}':`, error);
       }
     }
 

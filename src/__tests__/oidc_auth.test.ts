@@ -24,7 +24,7 @@ vi.mock("../config/env.js", () => ({
     MCP_AUTH_MODE: "oidc_jwks",
     MCP_JWKS_URI: "https://idp.example.com/.well-known/jwks.json",
     MCP_JWT_ISSUER: "https://idp.example.com",
-    MCP_JWT_AUDIENCE: "super-mcp-api",
+    MCP_JWT_AUDIENCE: "karma-api",
     MCP_TENANT_ID: "tenant_test",
     MCP_TRUST_IDENTITY_HEADERS: false,
     MCP_API_KEY: undefined,
@@ -45,7 +45,7 @@ const VALID_PAYLOAD = {
   sub: "user-oidc-123",
   azp: "client-spa",
   iss: "https://idp.example.com",
-  aud: "super-mcp-api",
+  aud: "karma-api",
   tenant_id: "tenant_test",
   scope: "mcp:invoke profile",
 };
@@ -107,7 +107,7 @@ describe("oidc_jwks authentication", () => {
       2,
       "token-2",
       JWKS_HANDLE,
-      { issuer: "https://idp.example.com", audience: "super-mcp-api" },
+      { issuer: "https://idp.example.com", audience: "karma-api" },
     );
   });
 
@@ -125,7 +125,7 @@ describe("oidc_jwks authentication", () => {
       JWKS_HANDLE,
       {
         issuer: "https://idp.example.com",
-        audience: "super-mcp-api",
+        audience: "karma-api",
       },
     );
   });

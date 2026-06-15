@@ -94,7 +94,7 @@ const ITEMS: readonly PatternDebtItem[] = [
     title: "OAuth resource indicator enforcement",
     status: "implemented",
     urgency: "resolved",
-    currentControl: "SUPER-MCP is treated as an OAuth Resource Server: JWT secret mode and OIDC JWKS mode validate issuer/audience as configured, enforce MCP_RESOURCE_URI against aud/resource claims when configured, publish protected resource metadata once, and enforce per-tool requiredScopes downstream.",
+    currentControl: "KARMA is treated as an OAuth Resource Server: JWT secret mode and OIDC JWKS mode validate issuer/audience as configured, enforce MCP_RESOURCE_URI against aud/resource claims when configured, publish protected resource metadata once, and enforce per-tool requiredScopes downstream.",
     limitation: "PKCE, TokenManager, authorization-code initiation, refresh-token rotation, and client login flows are intentionally absent because they belong to OAuth clients, not this resource server.",
     resolutionTrigger: "A future product explicitly adds a first-party OAuth client component separate from the resource server.",
     implementationGate: "Do not add TokenManager or server-side PKCE to the resource-server path. Any future OAuth client flow must be separate and tested independently.",
@@ -171,6 +171,6 @@ export function getPatternDebtSummary() {
 
 export function assertKnownPatternDebtId(id: string): asserts id is PatternDebtId {
   if (!(PATTERN_DEBT_IDS as readonly string[]).includes(id)) {
-    throw new Error(`[SUPER-MCP] Unknown pattern debt id: ${id}`);
+    throw new Error(`[KARMA] Unknown pattern debt id: ${id}`);
   }
 }

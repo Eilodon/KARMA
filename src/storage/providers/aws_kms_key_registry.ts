@@ -97,15 +97,15 @@ export class AwsKmsKeyRegistry implements ITenantKeyRegistry {
     if (existing) return this.metaToRecord(existing, scope);
 
     const createRes = await this.kms.send(new CreateKeyCommand({
-      Description: `super-mcp:tenant:${oid}`,
+      Description: `karma:tenant:${oid}`,
       KeyUsage: "ENCRYPT_DECRYPT",
       KeySpec: "SYMMETRIC_DEFAULT",
-      Tags: [{ TagKey: "super-mcp-project", TagValue: this.cfg.projectSalt }],
+      Tags: [{ TagKey: "karma-project", TagValue: this.cfg.projectSalt }],
     }));
     const kmsKeyId = createRes.KeyMetadata!.KeyId!;
 
     await this.kms.send(new CreateAliasCommand({
-      AliasName: `alias/super-mcp/${this.cfg.projectSalt.replace(/[^a-zA-Z0-9_-]/g, "_")}/${oid}`,
+      AliasName: `alias/karma/${this.cfg.projectSalt.replace(/[^a-zA-Z0-9_-]/g, "_")}/${oid}`,
       TargetKeyId: kmsKeyId,
     })).catch(() => {}); // ignore if alias already exists
 
@@ -132,7 +132,7 @@ export class AwsKmsKeyRegistry implements ITenantKeyRegistry {
     const version = (prev?.version ?? 0) + 1;
 
     const createRes = await this.kms.send(new CreateKeyCommand({
-      Description: `super-mcp:tenant:${oid}:v${version}`,
+      Description: `karma:tenant:${oid}:v${version}`,
       KeyUsage: "ENCRYPT_DECRYPT",
       KeySpec: "SYMMETRIC_DEFAULT",
     }));

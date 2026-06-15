@@ -40,7 +40,7 @@ export class RedisExecutionLockManager implements IExecutionLockManager {
   }
 
   private getKey(tenantId: string): string {
-    return `super_mcp:lock:${ENV.MCP_PROJECT_ID}:${tenantId}`;
+    return `karma:lock:${ENV.MCP_PROJECT_ID}:${tenantId}`;
   }
 
   async withTenantLock<T>(tenantId: string, operation: (signal?: AbortSignal) => Promise<T>): Promise<T> {
@@ -83,15 +83,15 @@ export class RedisExecutionLockManager implements IExecutionLockManager {
               `;
               const result = await this.redis.eval(script, 1, key, token, this.ttlMs);
               if (Number(result) !== 1) {
-                abortLock(new Error("[SUPER-MCP] Tenant execution lock was lost."));
+                abortLock(new Error("[KARMA] Tenant execution lock was lost."));
                 return;
               }
               consecutiveHeartbeatFailures = 0;
             } catch (err) {
               consecutiveHeartbeatFailures += 1;
-              console.error("[SUPER-MCP] Failed to refresh tenant execution lock:", err);
+              console.error("[KARMA] Failed to refresh tenant execution lock:", err);
               if (consecutiveHeartbeatFailures >= 2) {
-                abortLock(new Error("[SUPER-MCP] Tenant execution lock heartbeat failed repeatedly."));
+                abortLock(new Error("[KARMA] Tenant execution lock heartbeat failed repeatedly."));
               }
             } finally {
               refreshInFlight = false;
@@ -118,7 +118,7 @@ export class RedisExecutionLockManager implements IExecutionLockManager {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
 
-      throw new Error(`[SUPER-MCP] Could not acquire tenant execution lock for ${tenantId}`);
+      throw new Error(`[KARMA] Could not acquire tenant execution lock for ${tenantId}`);
     });
   }
 

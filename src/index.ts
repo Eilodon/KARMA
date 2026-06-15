@@ -32,18 +32,18 @@ async function main() {
   await runtime.initialize();
   const state = await runtime.getDefaultState();
 
-  console.error(`[SUPER-MCP] Server Started v1.0.0`);
-  console.error(`[SUPER-MCP] Tenant: ${ENV.MCP_TENANT_ID} | Project: ${ENV.MCP_PROJECT_ID}`);
-  console.error(`[SUPER-MCP] Config: Transport=${ENV.TRANSPORT_DRIVER}, Storage=${ENV.STORAGE_DRIVER}, Telemetry=${ENV.TELEMETRY_DRIVER}`);
-  console.error(`[SUPER-MCP] Security: Encrypted=${!!ENV.MCP_ENCRYPTION_KEY}, SafeMode=${ENV.MCP_SAFE_MODE}`);
-  console.error(`[SUPER-MCP] Current Phase: ${state.phase}`);
+  console.error(`[KARMA] Server Started v1.0.0`);
+  console.error(`[KARMA] Tenant: ${ENV.MCP_TENANT_ID} | Project: ${ENV.MCP_PROJECT_ID}`);
+  console.error(`[KARMA] Config: Transport=${ENV.TRANSPORT_DRIVER}, Storage=${ENV.STORAGE_DRIVER}, Telemetry=${ENV.TELEMETRY_DRIVER}`);
+  console.error(`[KARMA] Security: Encrypted=${!!ENV.MCP_ENCRYPTION_KEY}, SafeMode=${ENV.MCP_SAFE_MODE}`);
+  console.error(`[KARMA] Current Phase: ${state.phase}`);
 
   // P3-B: MCP_TRUST_IDENTITY_HEADERS is an advanced forwarding mode that relies
   // entirely on a trusted upstream auth gateway to inject identity headers.
   // Enabling it without a proper gateway is a critical security misconfiguration.
   if (ENV.MCP_TRUST_IDENTITY_HEADERS) {
     console.error(
-      "[SUPER-MCP] WARNING: MCP_TRUST_IDENTITY_HEADERS=true — " +
+      "[KARMA] WARNING: MCP_TRUST_IDENTITY_HEADERS=true — " +
       "identity headers (x-mcp-tenant-id, x-mcp-user-id, x-mcp-client-id, x-mcp-scopes) are " +
       "accepted from upstream. Only enable behind a trusted auth gateway (e.g. OAuth2 proxy, " +
       "mTLS-verified sidecar). Direct exposure will allow clients to impersonate any tenant/user."
@@ -53,7 +53,7 @@ async function main() {
   // D-5.3 fix: warn on startup so operators know they are running without DoS controls.
   if (ENV.TRANSPORT_DRIVER === "http" && (!ENV.ENABLE_RATE_LIMIT || !ENV.ENABLE_QUOTA)) {
     console.error(
-      "[SUPER-MCP] WARNING: ENABLE_RATE_LIMIT and/or ENABLE_QUOTA are disabled. " +
+      "[KARMA] WARNING: ENABLE_RATE_LIMIT and/or ENABLE_QUOTA are disabled. " +
       "Set both to true to prevent request flooding and resource exhaustion."
     );
   }
@@ -169,7 +169,7 @@ async function main() {
           server = await runtime.connectEphemeral(transport);
           await transport.handleRequest(req, res, req.body);
         } catch (error) {
-          console.error("[SUPER-MCP] Error handling MCP HTTP request:", error);
+          console.error("[KARMA] Error handling MCP HTTP request:", error);
           if (!res.headersSent) {
             res.status(500).json(jsonRpcError(-32603, "Internal server error"));
           }
@@ -189,7 +189,7 @@ async function main() {
     });
 
     const server = app.listen(ENV.HTTP_PORT, ENV.HTTP_HOST, () => {
-      console.error(`[SUPER-MCP] Server listening on HTTP ${ENV.HTTP_HOST}:${ENV.HTTP_PORT} at /mcp`);
+      console.error(`[KARMA] Server listening on HTTP ${ENV.HTTP_HOST}:${ENV.HTTP_PORT} at /mcp`);
     });
     (runtime as any)._httpServer = server;
   } else {
@@ -198,10 +198,10 @@ async function main() {
   }
 
   const shutdown = async (signal: string) => {
-    console.error(`\n[SUPER-MCP] Nhận tín hiệu ${signal}. Tiến hành tắt an toàn (Graceful Shutdown)...`);
+    console.error(`\n[KARMA] Received signal ${signal}. Initiating Graceful Shutdown...`);
     try {
       if ((runtime as any)._httpServer) {
-        console.error(`[SUPER-MCP] Đang đóng HTTP Server...`);
+        console.error(`[KARMA] Closing HTTP Server...`);
         await new Promise<void>((resolve, reject) => {
           (runtime as any)._httpServer.close((err: unknown) => err ? reject(err instanceof Error ? err : new Error("Server close failed", { cause: err })) : resolve());
         });
@@ -211,10 +211,10 @@ async function main() {
       globalTaskTracker.beginDraining();
       await globalTaskTracker.awaitAll(30000);
       await runtime.close();
-      console.error("[SUPER-MCP] Đã tắt an toàn.");
+      console.error("[KARMA] Graceful shutdown completed.");
       process.exit(0);
     } catch (err) {
-      console.error("[SUPER-MCP] Lỗi khi tắt:", err);
+      console.error("[KARMA] Error during shutdown:", err);
       process.exit(1);
     }
   };
@@ -224,6 +224,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("[SUPER-MCP] Fatal Crash:", error);
+  console.error("[KARMA] Fatal Crash:", error);
   process.exit(1);
 });

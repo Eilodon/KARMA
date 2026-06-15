@@ -58,7 +58,7 @@ class RedisQuotaManager implements IQuotaManager {
     const resetTime = getResetTime();
     if (!ENV.ENABLE_QUOTA) return { allowed: true, used: 0, resetAt: resetTime };
 
-    const key = `super_mcp:quota:${ENV.MCP_PROJECT_ID}:${tenantId}`;
+    const key = `karma:quota:${ENV.MCP_PROJECT_ID}:${tenantId}`;
     const ttlSeconds = Math.max(1, Math.ceil((resetTime.getTime() - Date.now()) / 1000));
 
     const script = `

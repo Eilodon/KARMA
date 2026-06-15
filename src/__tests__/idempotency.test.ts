@@ -6,7 +6,7 @@ describe("Idempotency Manager", () => {
     const tenantId = "tenant-123";
     const toolName = "test_tool";
     
-    // Hai payload có cùng nội dung nhưng khác thứ tự key
+    // Two payloads with identical content but different key order
     const args1 = { a: 1, b: 2 };
     const args2 = { b: 2, a: 1 };
     
@@ -53,7 +53,7 @@ describe("Idempotency Manager", () => {
     const first = await globalIdempotencyManager.tryAcquireOrGetCached(key);
     expect(first.locked).toBe(true);
 
-    const errorResult = { content: [{ type: "text", text: "[SUPER-MCP] Task Failed: boom" }] };
+    const errorResult = { content: [{ type: "text", text: "[KARMA] Task Failed: boom" }] };
     await globalIdempotencyManager.commitError(key, errorResult, 300);
 
     const cached = await globalIdempotencyManager.peek(key);

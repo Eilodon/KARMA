@@ -1,13 +1,13 @@
-name: super-mcp
+name: karma
 
 services:
   redis:
     image: docker.io/library/redis:7-alpine
-    container_name: super_mcp_redis
+    container_name: karma_redis
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD}
     volumes:
-      - super_mcp_redis_data:/data
+      - karma_redis_data:/data
     restart: unless-stopped
     command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
     cap_drop:
@@ -20,7 +20,7 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    container_name: super_mcp_server
+    container_name: karma_server
     environment:
       - STORAGE_DRIVER=redis
       - TELEMETRY_DRIVER=stdout
@@ -62,4 +62,4 @@ services:
     # Intentionally no public port mapping by default. Expose only behind a trusted ingress/reverse proxy.
 
 volumes:
-  super_mcp_redis_data:
+  karma_redis_data:

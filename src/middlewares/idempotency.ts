@@ -8,13 +8,13 @@ export function assertJsonSerializable(value: unknown, path = "$", seen = new We
   const valueType = typeof value;
   if (valueType === "string" || valueType === "number" || valueType === "boolean") return;
   if (valueType === "bigint" || valueType === "function" || valueType === "symbol" || valueType === "undefined") {
-    throw new Error(`[SUPER-MCP] Idempotency args must be JSON-serializable. Invalid value at ${path}.`);
+    throw new Error(`[KARMA] Idempotency args must be JSON-serializable. Invalid value at ${path}.`);
   }
   if (value instanceof Date || value instanceof Map || value instanceof Set) {
-    throw new Error(`[SUPER-MCP] Idempotency args must be plain JSON, not ${value.constructor.name}, at ${path}.`);
+    throw new Error(`[KARMA] Idempotency args must be plain JSON, not ${value.constructor.name}, at ${path}.`);
   }
   if (Array.isArray(value)) {
-    if (seen.has(value)) throw new Error(`[SUPER-MCP] Idempotency args must not contain circular references at ${path}.`);
+    if (seen.has(value)) throw new Error(`[KARMA] Idempotency args must not contain circular references at ${path}.`);
     seen.add(value);
     value.forEach((item, index) => assertJsonSerializable(item, `${path}[${index}]`, seen));
     seen.delete(value);
@@ -23,9 +23,9 @@ export function assertJsonSerializable(value: unknown, path = "$", seen = new We
   if (valueType === "object") {
     const proto: unknown = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) {
-      throw new Error(`[SUPER-MCP] Idempotency args must be plain JSON objects at ${path}.`);
+      throw new Error(`[KARMA] Idempotency args must be plain JSON objects at ${path}.`);
     }
-    if (seen.has(value as object)) throw new Error(`[SUPER-MCP] Idempotency args must not contain circular references at ${path}.`);
+    if (seen.has(value as object)) throw new Error(`[KARMA] Idempotency args must not contain circular references at ${path}.`);
     seen.add(value as object);
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       assertJsonSerializable(child, `${path}.${key}`, seen);
@@ -70,7 +70,7 @@ export interface IIdempotencyManager {
 }
 
 function keyPrefix(): string {
-  return `super_mcp:idempotency:${ENV.MCP_PROJECT_ID}:`;
+  return `karma:idempotency:${ENV.MCP_PROJECT_ID}:`;
 }
 
 function makeKey(hash: string): string {

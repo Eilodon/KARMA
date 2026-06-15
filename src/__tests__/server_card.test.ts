@@ -26,7 +26,7 @@ describe("MCP server card", () => {
     const card = createServerCard(tools, "1.0.0") as any;
     const tool = card.tools.find((entry: any) => entry.name === "read_calendar");
 
-    expect(card.name).toBe("super-mcp-server");
+    expect(card.name).toBe("karma-server");
     expect(tool.annotations.readOnlyHint).toBe(true);
     expect(tool.execution.taskSupport).toBe("forbidden");
     expect(card.auth.scopes).toEqual(["calendar:read"]);

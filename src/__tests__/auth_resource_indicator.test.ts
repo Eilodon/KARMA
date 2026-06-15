@@ -4,7 +4,7 @@ const mockEnv = vi.hoisted(() => ({
   MCP_AUTH_MODE: "jwt",
   MCP_JWT_SECRET: "x".repeat(32),
   MCP_JWT_ISSUER: "https://issuer.example.com",
-  MCP_JWT_AUDIENCE: "super-mcp-api",
+  MCP_JWT_AUDIENCE: "karma-api",
   MCP_RESOURCE_URI: "https://api.example.com/mcp",
   MCP_TENANT_ID: "tenant_test",
   MCP_TRUST_IDENTITY_HEADERS: false,
@@ -45,7 +45,7 @@ describe("OAuth resource indicator enforcement", () => {
     vi.clearAllMocks();
     mockEnv.MCP_AUTH_MODE = "jwt";
     mockEnv.MCP_RESOURCE_URI = "https://api.example.com/mcp";
-    mockEnv.MCP_JWT_AUDIENCE = "super-mcp-api";
+    mockEnv.MCP_JWT_AUDIENCE = "karma-api";
   });
 
   test("accepts token when aud equals MCP_RESOURCE_URI", async () => {
@@ -54,12 +54,12 @@ describe("OAuth resource indicator enforcement", () => {
   });
 
   test("accepts token when aud array contains MCP_RESOURCE_URI", async () => {
-    const ctx = await authenticatePayload({ aud: ["super-mcp-api", "https://api.example.com/mcp"] });
+    const ctx = await authenticatePayload({ aud: ["karma-api", "https://api.example.com/mcp"] });
     expect(ctx.userId).toBe("user-123");
   });
 
   test("accepts token when resource equals MCP_RESOURCE_URI", async () => {
-    const ctx = await authenticatePayload({ aud: "super-mcp-api", resource: "https://api.example.com/mcp" });
+    const ctx = await authenticatePayload({ aud: "karma-api", resource: "https://api.example.com/mcp" });
     expect(ctx.userId).toBe("user-123");
   });
 
@@ -72,12 +72,12 @@ describe("OAuth resource indicator enforcement", () => {
   });
 
   test("rejects token when aud matches MCP_JWT_AUDIENCE but not MCP_RESOURCE_URI", async () => {
-    await expect(authenticatePayload({ aud: "super-mcp-api" })).rejects.toThrow("Unauthorized");
+    await expect(authenticatePayload({ aud: "karma-api" })).rejects.toThrow("Unauthorized");
   });
 
   test("no-op when MCP_RESOURCE_URI unset", async () => {
     mockEnv.MCP_RESOURCE_URI = undefined as any;
-    const ctx = await authenticatePayload({ aud: "super-mcp-api" });
+    const ctx = await authenticatePayload({ aud: "karma-api" });
     expect(ctx.userId).toBe("user-123");
   });
 

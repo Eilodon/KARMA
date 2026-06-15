@@ -39,7 +39,7 @@ const EnvSchema = z.object({
   MCP_ENCRYPTION_KEY: z.string().optional(),
   MCP_ALLOW_LEGACY_SHA256_KDF: z.boolean().default(false),
   MCP_SAFE_MODE: z.boolean().default(true),
-  MCP_PROJECT_ID: z.string().default("super_mcp_default"),
+  MCP_PROJECT_ID: z.string().default("karma_default"),
   MCP_TENANT_ID: z.string().default("tenant_local"),
   MCP_TRUST_IDENTITY_HEADERS: z.boolean().default(false),
 
@@ -96,7 +96,7 @@ const EnvSchema = z.object({
   MCP_HTTP_BODY_LIMIT: z.string().default("100kb"),
   MCP_TELEMETRY_MAX_BYTES: z.number().int().min(1024).default(1024 * 1024),
   MCP_TELEMETRY_MAX_BACKUPS: z.number().int().min(1).max(100).default(5),
-  OTEL_SERVICE_NAME: z.string().default("super-mcp-server"),
+  OTEL_SERVICE_NAME: z.string().default("karma-server"),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
 
   MCP_TASK_POLL_INTERVAL_MS: z.number().int().min(1000).max(60000).default(5000),

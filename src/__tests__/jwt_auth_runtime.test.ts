@@ -3,7 +3,7 @@ import { SignJWT } from "jose";
 
 const SECRET = "s".repeat(32);
 const ISSUER = "https://issuer.example.com";
-const AUDIENCE = "super-mcp-api";
+const AUDIENCE = "karma-api";
 const RESOURCE = "https://api.example.com/mcp";
 
 async function importAuthWithJwtEnv() {

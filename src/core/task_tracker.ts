@@ -21,7 +21,7 @@ export class TaskTracker {
       promise,
       new Promise((_, reject) => setTimeout(() => reject(new Error(`Task Hard Timeout (${hardTimeoutMs}ms)`)), hardTimeoutMs))
     ]).catch(err => {
-      console.error("[SUPER-MCP] Background Task bị hủy do quá timeout hoặc lỗi:", err);
+      console.error("[KARMA] Background Task cancelled due to timeout or error:", err);
     });
 
     this.activeTasks.add(safePromise);
@@ -33,7 +33,7 @@ export class TaskTracker {
 
   async awaitAll(timeoutMs: number = 30000): Promise<void> {
     if (this.activeTasks.size === 0) return;
-    console.error(`[SUPER-MCP] Đang chờ ${this.activeTasks.size} task(s) chạy ngầm hoàn tất... (Timeout: ${timeoutMs}ms)`);
+    console.error(`[KARMA] Waiting for ${this.activeTasks.size} background task(s) to complete... (Timeout: ${timeoutMs}ms)`);
     const timeoutPromise = new Promise<void>((_, reject) => {
       setTimeout(() => reject(new Error("Timeout waiting for tasks")), timeoutMs);
     });
@@ -44,11 +44,11 @@ export class TaskTracker {
         timeoutPromise
       ]);
       if (this.activeTasks.size > 0) {
-        console.error(`[SUPER-MCP] Vẫn còn ${this.activeTasks.size} task(s) sau lượt chờ đầu tiên.`);
+        console.error(`[KARMA] ${this.activeTasks.size} task(s) remaining after first await pass.`);
       }
-      console.error(`[SUPER-MCP] Tất cả task đã dọn dẹp xong.`);
+      console.error(`[KARMA] All tasks cleaned up.`);
     } catch {
-      console.error(`[SUPER-MCP] Bỏ qua các task đang treo do quá thời gian chờ (Timeout).`);
+      console.error(`[KARMA] Abandoning hanging tasks due to timeout.`);
     }
   }
 }

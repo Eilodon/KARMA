@@ -1,7 +1,7 @@
 {
-  "name": "super-mcp-boilerplate",
+  "name": "karma",
   "version": "1.0.0",
-  "description": "Ultimate Universal MCP Boilerplate (Local & Cloud) extracted from VECTOR and Fortuna",
+  "description": "First use case of SUPER-MCP",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

@@ -31,9 +31,9 @@ function decodeRawKey(secretKey: string): Uint8Array | null {
 }
 
 /**
- * Dịch vụ mã hóa cấu hình (EncryptionService).
- * Tự động mã hóa/giải mã toàn bộ Blob dữ liệu nếu có MCP_ENCRYPTION_KEY.
- * Đảm bảo an toàn (Data at Rest) dù lưu ở Local FS hay Redis.
+ * Configuration encryption service (EncryptionService).
+ * Automatically encrypts/decrypts the entire data Blob if MCP_ENCRYPTION_KEY is provided.
+ * Ensures security (Data at Rest) whether stored in Local FS or Redis.
  */
 export class EncryptionService {
   private readonly secretKey?: string;
