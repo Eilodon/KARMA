@@ -18,8 +18,13 @@ function parseList(raw: string): string[] {
   return raw.split(",").map(s => s.trim()).filter(Boolean);
 }
 
-function isTrustedBuiltInPlugin(fileName: string): boolean {
-  return fileName === "system.tool.ts" || fileName === "system.tool.js";
+// karma.tool is a FIRST-PARTY plugin that must run in-process (trusted built-in), not the
+// external child-process runner: it relies on module singletons (keystoreManager, skillIndex)
+// and reads PHAROS_*/KEYSTORE_* from process.env, neither of which survive the external worker
+// (per-call fork + workerEnv() env allowlist). See docs/superpowers/specs/karma-app-layer.md D-1.
+export function isTrustedBuiltInPlugin(fileName: string): boolean {
+  return fileName === "system.tool.ts" || fileName === "system.tool.js"
+      || fileName === "karma.tool.ts" || fileName === "karma.tool.js";
 }
 
 
