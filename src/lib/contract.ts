@@ -194,3 +194,157 @@ export async function writeContractBounded(
     timeoutMs,
   );
 }
+
+// ── Event indexer (P4.3 / L4 / L6) ─────────────────────────────────────────────
+//
+// Keeps the in-process BM25 index reconciled with on-chain truth. On (re)start it backfills
+// missed logs via getLogs(lastIndexedBlock, head) — closing the gap a dropped subscription or
+// a restart would otherwise leave — then watches live. onError triggers reconnect (re-backfill
+// + re-watch). lastIndexedBlock + lastEventAt form a heartbeat surfaced through karma_health.
+// Downstream processing must be idempotent (BM25 upsert is) so the 1-block backfill overlap is
+// harmless. The state machine below is decoupled from viem for unit testing.
+
+export type IndexedEvent =
+  | { type: "SkillRegistered"; blockNumber: bigint; skillId: bigint; owner: Address; name: string; pricePerCall: bigint }
+  | { type: "SkillDeactivated"; blockNumber: bigint; skillId: bigint }
+  | { type: "JobCompleted"; blockNumber: bigint; jobId: bigint; provider: Address; payout: bigint; newReputation: bigint };
+
+export interface IndexerWatchHandlers {
+  onLogs: (events: IndexedEvent[]) => void;
+  onError: (err: unknown) => void;
+}
+
+export interface IndexerDeps {
+  getBlockNumber: () => Promise<bigint>;
+  getLogs: (fromBlock: bigint, toBlock: bigint) => Promise<IndexedEvent[]>;
+  watch: (handlers: IndexerWatchHandlers) => () => void;
+  now?: () => number;
+}
+
+export interface IndexerHealth {
+  watching: boolean;
+  lastIndexedBlock: string; // stringified bigint (D-6)
+  lastEventAt: number | null;
+}
+
+export class SkillEventIndexer {
+  private lastIndexedBlock: bigint;
+  private lastEventAt: number | null = null;
+  private watching = false;
+  private unwatch?: () => void;
+  private readonly now: () => number;
+
+  constructor(
+    private readonly deps: IndexerDeps,
+    private readonly onEvent: (e: IndexedEvent) => void,
+    fromBlock = 0n,
+  ) {
+    this.lastIndexedBlock = fromBlock;
+    this.now = deps.now ?? Date.now;
+  }
+
+  async start(): Promise<void> {
+    await this.backfill();
+    this.subscribe();
+  }
+
+  private async backfill(): Promise<void> {
+    const head = await this.deps.getBlockNumber();
+    if (head < this.lastIndexedBlock) return; // chain reorg/empty — nothing new
+    const logs = await this.deps.getLogs(this.lastIndexedBlock, head);
+    for (const e of logs) this.process(e);
+    if (head > this.lastIndexedBlock) this.lastIndexedBlock = head;
+  }
+
+  private subscribe(): void {
+    this.unwatch = this.deps.watch({
+      onLogs: (events) => {
+        for (const e of events) this.process(e);
+      },
+      onError: (err) => void this.reconnect(err),
+    });
+    this.watching = true;
+  }
+
+  private async reconnect(_err: unknown): Promise<void> {
+    this.watching = false;
+    this.unwatch?.();
+    await this.backfill();
+    this.subscribe();
+  }
+
+  private process(e: IndexedEvent): void {
+    if (e.blockNumber > this.lastIndexedBlock) this.lastIndexedBlock = e.blockNumber;
+    this.lastEventAt = this.now();
+    this.onEvent(e);
+  }
+
+  stop(): void {
+    this.unwatch?.();
+    this.watching = false;
+  }
+
+  health(): IndexerHealth {
+    return {
+      watching: this.watching,
+      lastIndexedBlock: this.lastIndexedBlock.toString(),
+      lastEventAt: this.lastEventAt,
+    };
+  }
+}
+
+/** Map a raw viem contract-event log to the indexed shape (null = event we don't track). */
+function mapLog(raw: unknown): IndexedEvent | null {
+  const log = raw as { eventName?: string; args?: Record<string, unknown>; blockNumber?: bigint | null };
+  const bn = log.blockNumber;
+  const a = log.args;
+  if (bn == null || !log.eventName || !a) return null; // pending log or unrelated
+  switch (log.eventName) {
+    case "SkillRegistered":
+      return {
+        type: "SkillRegistered", blockNumber: bn,
+        skillId: a.skillId as bigint, owner: a.owner as Address,
+        name: a.name as string, pricePerCall: a.pricePerCall as bigint,
+      };
+    case "SkillDeactivated":
+      return { type: "SkillDeactivated", blockNumber: bn, skillId: a.skillId as bigint };
+    case "JobCompleted":
+      return {
+        type: "JobCompleted", blockNumber: bn,
+        jobId: a.jobId as bigint, provider: a.provider as Address,
+        payout: a.payout as bigint, newReputation: a.newReputation as bigint,
+      };
+    default:
+      return null;
+  }
+}
+
+/** Production wiring of the indexer over the real Pharos clients; starts immediately. */
+export function startSkillIndexer(onEvent: (e: IndexedEvent) => void, fromBlock = 0n): SkillEventIndexer {
+  const publicClient = getPublicClient();
+  const address = getContractAddress();
+  const toEvents = (logs: unknown[]): IndexedEvent[] =>
+    logs.map(mapLog).filter((e): e is IndexedEvent => e !== null);
+  const deps: IndexerDeps = {
+    getBlockNumber: () => publicClient.getBlockNumber(),
+    getLogs: async (from, to) =>
+      toEvents(
+        await publicClient.getContractEvents({
+          address,
+          abi: agentSkillRegistryAbi,
+          fromBlock: from,
+          toBlock: to,
+        }),
+      ),
+    watch: ({ onLogs, onError }) =>
+      publicClient.watchContractEvent({
+        address,
+        abi: agentSkillRegistryAbi,
+        onLogs: (logs) => onLogs(toEvents(logs as unknown[])),
+        onError,
+      }),
+  };
+  const indexer = new SkillEventIndexer(deps, onEvent, fromBlock);
+  void indexer.start();
+  return indexer;
+}
