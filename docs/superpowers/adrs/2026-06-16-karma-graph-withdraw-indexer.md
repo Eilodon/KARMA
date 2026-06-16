@@ -69,6 +69,10 @@ overrides; no *persisted* checkpoint — startup cost grows with chain length). 
   `mapLog`/`toIndexedEvents`/`buildViemIndexerDeps`, `karma_health` indexer surfacing. [verified 2026-06-16]
 - Tool count: `createKarmaTools` returns 9 economy tools (+ `karma_health` = 10 total). [verified 2026-06-16]
 - Live read/write paths (register→…→withdraw) still verified only by the P7 demo, not CI. [ASSUMED — see PD-002]
+- [G.CDOC verified 2026-06-16] Section 3 spot-checked against code: `withdraw` decodes the
+  `Withdrawn` event (`karma_service.ts:174`); serial event chain (`skill_indexer_runtime.ts:80`);
+  `karma_health` indexer field (`karma.tool.ts:60`); `mapLog`/`toIndexedEvents`/`buildViemIndexerDeps`
+  exported (`contract.ts:300/326/352`); demo step 5 routes through the tools (`run_demo.ts:94-95`).
 
 ## 8. Owner
 **KARMA team — gokuderafight@gmail.com**
