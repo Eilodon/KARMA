@@ -85,6 +85,10 @@ silent); (d) `redactErrorText` may over-redact a wei run in an error string (acc
 - A3: N=600 > cap → exactly 500 `readJob` calls, `truncated:true`, `total_unique_jobs:600`; N=3 →
   `truncated:false` (`karma_tools.test.ts`). [verified 2026-06-17]
 - No `.sol` / `abi.ts` / deployed-address change (grep confirms). [verified 2026-06-17]
+- [G.CDOC 2026-06-17] Spot-checked Section 3 claims against code: HEX32 redaction only in
+  `redactErrorText` (0 refs inside `scanToolOutput`); `return await` present in the chokepoint;
+  `makeToolErrorResult` + `toClientError` both delegate to `redactErrorText`; chokepoint `throw
+  toClientError(error)` present; all 8 plugin account/address sites threaded. All VERIFIED.
 
 ## 8. Owner
 **KARMA team — gokuderafight@gmail.com**
