@@ -6,6 +6,7 @@ import { realKarmaService, type KarmaService } from "../lib/karma_service.js";
 import { isTrustedRuntime } from "../core/runtime_identity.js";
 import { getRequestContext } from "../security/context.js";
 import { getKarmaIndexerHealth } from "../lib/skill_indexer_runtime.js";
+import { ENV } from "../config/env.js";
 import type { JobDetail, JobStatus, SocialGraphFullResult } from "../lib/types.js";
 
 /**
@@ -94,11 +95,26 @@ function weiToPhrs6(wei: bigint): string {
   return `${neg ? "-" : ""}${whole}.${frac6.toString().padStart(6, "0")}`;
 }
 
+/** Hydrate job ids in sequential chunks (matches the viem batchSize) to bound in-flight reads + memory. */
+async function readJobsChunked(
+  ids: string[],
+  svc: KarmaService,
+  chunk = 100,
+): Promise<Array<Awaited<ReturnType<KarmaService["readJob"]>>>> {
+  const out: Array<Awaited<ReturnType<KarmaService["readJob"]>>> = [];
+  for (let i = 0; i < ids.length; i += chunk) {
+    const slice = ids.slice(i, i + chunk);
+    out.push(...(await Promise.all(slice.map((id) => svc.readJob(BigInt(id))))));
+  }
+  return out;
+}
+
 /**
  * query_social_graph format:"full" — hydrate each job edge into a JobDetail + a summary block.
- * RPC cost: getProviderJobs + getRequesterJobs (1 batched round-trip) + N×jobs() (1 batched
- * round-trip, batchSize 100) = 2 round-trips for N ≤ 100. Reputation comes from the in-process
- * BM25 index (0 RPC). Reuses svc.readJob so the jobs() tuple is decoded in one place.
+ * RPC cost: getProviderJobs + getRequesterJobs (1 batched round-trip) + N×jobs() (batched, chunked
+ * by 100) ≈ 2 round-trips for N ≤ 100. Reputation comes from the in-process BM25 index (0 RPC).
+ * DoS cap (A3): at most KARMA_SOCIAL_GRAPH_MAX_JOBS edges are hydrated — beyond that the most-recent
+ * subset is kept and `summary.truncated` is set (detail arrays + earned/spent become PARTIAL).
  */
 async function handleFullFormat(address: Address, svc: KarmaService): Promise<SocialGraphFullResult> {
   const [providerIds, requesterIds] = await Promise.all([
@@ -106,8 +122,15 @@ async function handleFullFormat(address: Address, svc: KarmaService): Promise<So
     svc.getRequesterJobs(address),
   ]);
 
-  const uniqueIds = [...new Set([...providerIds, ...requesterIds].map(String))];
-  const jobs = await Promise.all(uniqueIds.map((id) => svc.readJob(BigInt(id))));
+  const allUnique = [...new Set([...providerIds, ...requesterIds].map(String))];
+  const cap = ENV.KARMA_SOCIAL_GRAPH_MAX_JOBS;
+  const truncated = allUnique.length > cap;
+  // Job ids are monotonic — keep the most-recent `cap` (numeric desc, never lexicographic).
+  const uniqueIds = truncated
+    ? [...allUnique].sort((a, b) => (BigInt(a) < BigInt(b) ? 1 : BigInt(a) > BigInt(b) ? -1 : 0)).slice(0, cap)
+    : allUnique;
+  const hydratedSet = new Set(uniqueIds);
+  const jobs = await readJobsChunked(uniqueIds, svc, 100);
   const jobById = new Map(uniqueIds.map((id, i) => [id, jobs[i]] as const));
 
   const toDetail = (id: bigint, counterpart: "requester" | "provider"): JobDetail => {
@@ -125,8 +148,13 @@ async function handleFullFormat(address: Address, svc: KarmaService): Promise<So
     };
   };
 
-  const asProvider = providerIds.map((id) => toDetail(id, "requester"));
-  const asRequester = requesterIds.map((id) => toDetail(id, "provider"));
+  // When truncated, only edges in the hydrated subset get a detail (avoids the hydration-miss throw).
+  const asProvider = providerIds
+    .filter((id) => hydratedSet.has(String(id)))
+    .map((id) => toDetail(id, "requester"));
+  const asRequester = requesterIds
+    .filter((id) => hydratedSet.has(String(id)))
+    .map((id) => toDetail(id, "provider"));
 
   const totalEarnedWei = asProvider
     .filter((j) => j.status === "Completed")
@@ -141,12 +169,14 @@ async function handleFullFormat(address: Address, svc: KarmaService): Promise<So
     as_provider: asProvider,
     as_requester: asRequester,
     summary: {
-      total_jobs_provided: asProvider.length,
-      total_jobs_requested: asRequester.length,
+      total_jobs_provided: providerIds.length, // full count (detail arrays may be capped — see truncated)
+      total_jobs_requested: requesterIds.length,
       total_earned_phrs: weiToPhrs6(totalEarnedWei),
       total_spent_phrs: weiToPhrs6(totalSpentWei),
       unique_partners: uniquePartners,
       reputation_score: svc.getByOwner(address)?.reputation_score ?? 50,
+      truncated,
+      total_unique_jobs: allUnique.length,
     },
   };
 }

@@ -29,7 +29,7 @@ describe("registrar system tool governance", () => {
     const asyncBranchStart = source.indexOf('if (taskSupport !== "forbidden" && supportsNativeTasks)');
     expect(asyncBranchStart).toBeGreaterThan(0);
 
-    const syncPathStart = source.indexOf("return globalExecutionLockManager.withTenantLock(tenantId,", asyncBranchStart);
+    const syncPathStart = source.indexOf("return await globalExecutionLockManager.withTenantLock(tenantId,", asyncBranchStart);
     expect(syncPathStart).toBeGreaterThan(asyncBranchStart);
 
     const asyncBranch = source.slice(asyncBranchStart, syncPathStart);
@@ -105,7 +105,7 @@ describe("registrar system tool governance", () => {
 
   test("sync path applies retryable error policy before caching permanent failures (NF-05)", async () => {
     const source = await readFile(new URL("../mcp/adapter/execution_pipeline.ts", import.meta.url), "utf-8");
-    const syncPathStart = source.indexOf("return globalExecutionLockManager.withTenantLock(tenantId,");
+    const syncPathStart = source.indexOf("return await globalExecutionLockManager.withTenantLock(tenantId,");
     const syncBranch = source.slice(syncPathStart);
 
     expect(syncBranch).toContain("if (isExecutionLockError(error) || isTransientError(error))");

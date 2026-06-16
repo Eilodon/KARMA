@@ -389,3 +389,39 @@ describe("A1 tenant isolation (STRIDE-S)", () => {
     expect(svc.addressOf).not.toHaveBeenCalled();
   });
 });
+
+describe("A3 social-graph fan-out cap (DoS)", () => {
+  beforeEach(() => markTrustedRuntime());
+
+  it("caps hydration at KARMA_SOCIAL_GRAPH_MAX_JOBS and flags truncated", async () => {
+    const ids = Array.from({ length: 600 }, (_, i) => BigInt(i + 1));
+    const svc = fakeService({
+      getProviderJobs: vi.fn(async () => ids),
+      getRequesterJobs: vi.fn(async () => []),
+      readJob: vi.fn(async () => ({
+        requester: ALPHA, provider: ALPHA, skillId: 1n, taskHash: `0x${"00".repeat(32)}`,
+        escrowAmount: 0n, deadline: 0n, status: 0, resultHash: `0x${"00".repeat(32)}`,
+        createdAt: 1n, completedAt: 0n,
+      }) as never),
+    });
+    const tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "query_social_graph"), { address: ALPHA, format: "full" });
+    const sc = res.structuredContent as { summary: { truncated: boolean; total_unique_jobs: number } };
+    expect(svc.readJob).toHaveBeenCalledTimes(500);
+    expect(sc.summary.truncated).toBe(true);
+    expect(sc.summary.total_unique_jobs).toBe(600);
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it("does not truncate below the cap (full hydration, flag false)", async () => {
+    const svc = fakeService({
+      getProviderJobs: vi.fn(async () => [4n, 9n]),
+      getRequesterJobs: vi.fn(async () => [2n]),
+    });
+    const tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "query_social_graph"), { address: ALPHA, format: "full" });
+    const sc = res.structuredContent as { summary: { truncated: boolean; total_unique_jobs: number } };
+    expect(sc.summary.truncated).toBe(false);
+    expect(sc.summary.total_unique_jobs).toBe(3);
+  });
+});

@@ -68,6 +68,14 @@ export interface SocialGraphSummary {
   total_spent_phrs: string; // sum of escrow on all requester jobs
   unique_partners: number; // distinct counterpart addresses
   reputation_score: number; // from BM25 index (0 extra RPC) or BASE fallback (50)
+  /**
+   * True when job edges exceeded KARMA_SOCIAL_GRAPH_MAX_JOBS (A3 DoS cap). When true, the detail
+   * arrays and total_earned/total_spent are computed over the most-recent capped subset and are
+   * therefore PARTIAL — total_jobs_provided/requested and total_unique_jobs remain full counts.
+   */
+  truncated: boolean;
+  /** Distinct job edges seen before applying the cap (full count, even when truncated). */
+  total_unique_jobs: number;
 }
 
 /** query_social_graph format:"full" result. */
