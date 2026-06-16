@@ -1,5 +1,36 @@
 import { describe, expect, test } from "vitest";
-import { scanToolOutput } from "../middlewares/output_firewall.js";
+import { scanToolOutput, redactErrorText } from "../middlewares/output_firewall.js";
+
+describe("redactErrorText (error-path firewall, A2)", () => {
+  test("redacts a bare private-key-shaped hex blob (HIGH, abductive-2)", () => {
+    const pk = "0x" + "a".repeat(64);
+    const out = redactErrorText(`viem signer failed for key ${pk}`);
+    expect(out).not.toContain(pk);
+    expect(out).toContain("[REDACTED:HEX32]");
+  });
+
+  test("redacts credentials, paths, and redis/pg URLs", () => {
+    const out = redactErrorText(
+      "boom sk-abcdefghijklmnopqrstuvwxyz123456 at /home/u/secret.json redis://h:6379 postgres://u:p@db/x",
+    );
+    expect(out).not.toMatch(/sk-abcdefghijklmnopqrstuvwxyz123456/);
+    expect(out).toContain("[path]");
+    expect(out).toContain("[redis]");
+    expect(out).toContain("[db]");
+  });
+
+  test("caps length at 256", () => {
+    expect(redactErrorText("x".repeat(1000)).length).toBeLessThanOrEqual(256);
+  });
+});
+
+describe("scanToolOutput must NOT redact 32-byte hex (result_hash invariant)", () => {
+  test("a 0x+64hex result hash survives normal tool output (HEX32 is error-path-only)", () => {
+    const hash = "0x" + "ab".repeat(32);
+    const scanned = scanToolOutput({ content: [{ type: "text", text: `result ${hash}` }] });
+    expect(scanned.result.content[0].text).toContain(hash);
+  });
+});
 
 describe("output firewall", () => {
   test("keeps existing text content redaction behavior", () => {
