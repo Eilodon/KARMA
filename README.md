@@ -1,0 +1,1466 @@
+# KARMA
+
+**KARMA** is a blockchain-backed AI agent skill economy built on top of **SUPER-MCP** — a hardened TypeScript / ESM framework for production-oriented [Model Context Protocol](https://modelcontextprotocol.io/) servers.
+
+The system has three layers:
+
+- **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
+- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Eight MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm), reputation reading, and social-graph queries. Runs in-process as a trusted built-in; private keys never leave the process.
+- **Layer 2 — `AgentSkillRegistry` contract:** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, and withdrawals. Verified live at [`0x75ff9822…753f57`](https://atlantic.pharosscan.xyz/address/0x75ff9822f9da947881247cecba74dccdea753f57).
+
+> Package: `karma`
+> Runtime entrypoint: `dist/index.js`
+> Default transport: `stdio`
+> Default protocol mode: `rc2026` only
+> Default storage: local filesystem (`fs`)
+> Default plugin isolation mode: external child-process best-effort runner for non-built-in plugins
+> Production storage requirement: Redis
+> Production HTTP auth requirement: JWT or OIDC JWKS, not API key
+
+KARMA intentionally does **not** claim to provide a true security sandbox for untrusted plugins or a completed crypto-erasure runtime. Those are tracked as release-blocking epics until implemented with real container/microVM/WASM and KMS-backed primitives.
+
+---
+
+## Table of contents
+
+1. [Current status](#current-status)
+2. [What KARMA provides](#what-karma-provides)
+3. [Architecture](#architecture)
+4. [Repository layout](#repository-layout)
+5. [Requirements](#requirements)
+6. [Install and validation](#install-and-validation)
+7. [KARMA skill economy (Layer 1 + 2)](#karma-skill-economy-layer-1--2)
+8. [Pharos Atlantic configuration](#pharos-atlantic-configuration)
+9. [Keystore management](#keystore-management)
+10. [Deploying the contract](#deploying-the-contract)
+11. [Running the demo](#running-the-demo)
+12. [Quick start: stdio](#quick-start-stdio)
+13. [Quick start: local HTTP](#quick-start-local-http)
+14. [Production HTTP configuration](#production-http-configuration)
+15. [MCP protocol behavior](#mcp-protocol-behavior)
+16. [Authentication and request context](#authentication-and-request-context)
+17. [Native Tasks](#native-tasks)
+18. [Tool execution pipeline](#tool-execution-pipeline)
+19. [Storage and encryption](#storage-and-encryption)
+20. [Rate limit, quota, idempotency, and locks](#rate-limit-quota-idempotency-and-locks)
+21. [Output firewall](#output-firewall)
+22. [Plugin system](#plugin-system)
+23. [Writing plugins](#writing-plugins)
+24. [HTTP endpoints and headers](#http-endpoints-and-headers)
+25. [Docker / Compose](#docker--compose)
+26. [Configuration reference](#configuration-reference)
+27. [Testing and quality gates](#testing-and-quality-gates)
+28. [Pattern debt and limitations](#pattern-debt-and-limitations)
+29. [Troubleshooting](#troubleshooting)
+30. [License](#license)
+
+---
+
+## Current status
+
+### Layer 0 — SUPER-MCP runtime (fully shipped)
+
+- `tasks/update` is state-gated and nonce-bound.
+- Task input can be consumed only once and only while the task is `input_required`.
+- Stale, duplicate, early, and wrong-owner task input updates are rejected.
+- Production HTTP + JWT requires issuer, audience, and resource indicator.
+- Production HTTP + OIDC JWKS requires JWKS URI, issuer, audience, and resource indicator.
+- Production HTTP requires rate limit and quota unless `MCP_ALLOW_UNLIMITED_HTTP=true` is explicitly set.
+- Production non-built-in plugins fail closed unless `MCP_ALLOW_BEST_EFFORT_PLUGIN_SANDBOX=true` is explicitly waived, and require SHA-256 pinning + Node Permission model.
+- `MCP_IDEMPOTENCY_SECRET` is required when `STORAGE_DRIVER=redis`.
+- Identity gateway headers properly map to `gateway` auth type, enforcing scopes.
+- `LocalEnvVault` forces per-tenant namespace isolation.
+- Data at rest is encrypted with the `smcp:v3:hkdf-tenant` envelope.
+- `smcp:v4:kms` KMS-backed per-tenant DEK crypto-erasure is implemented (2026-06-14). Four providers: `LocalKeyRegistry` (dev/test), `VaultKeyRegistry`, `AwsKmsKeyRegistry`, and `GcpKmsKeyRegistry`.
+- Fully migrated to the v2.0 Modular SDK architecture (`@modelcontextprotocol/server`, `node`, `express`).
+- Enterprise regression tests available through `pnpm test:enterprise`.
+
+### Layer 1 — KARMA plugin (fully shipped, 2026-06-16)
+
+- Eight in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `get_agent_reputation`, `query_social_graph`.
+- Web3 Secret Storage v3 keystore (`KeystoreManager`): scrypt + aes-128-ctr in-process decrypt. Private keys never exposed — only viem `Account` objects.
+- In-process BM25 skill index (`BM25SkillIndex` via MiniSearch): reputation-boosted ranking, BigInt-safe price/reputation filters, prompt-injection-resistant text sanitization.
+- `SkillEventIndexer`: backfill + live-watch + reconnect on error. Heartbeat surfaced via `karma_health`.
+- Bounded write helper: exactly-once broadcast with `RECEIPT_TIMEOUT_MS=300_000 < MCP_LOCK_TTL_MS=420_000`. Timeout → `pending` outcome; never resend.
+- Exactly-once job guard: `deriveTaskHash(requester, skillId, nonce)` → check-before-write via `findJobByTaskHash`. No double-escrow on lost-ACK retry.
+- All `uint256` amounts and IDs cross the MCP boundary as decimal strings (`jsonSafe`, D-6).
+
+### Layer 2 — AgentSkillRegistry contract (live on Pharos Atlantic)
+
+- Deployed: [`0x75ff9822f9da947881247cecba74dccdea753f57`](https://atlantic.pharosscan.xyz/address/0x75ff9822f9da947881247cecba74dccdea753f57)
+- Deploy tx: [`0x8615c1ce…0cea8c`](https://atlantic.pharosscan.xyz/tx/0x8615c1ce7664913370c341af4342e4f27ffa9dbc3a02d65b8a89d044e10cea8c) (block 24283311, gas 1,462,073)
+- 5-transaction self-referential demo loop completed live — skill registered, job escrowed, result delivered, completion confirmed, payout withdrawn.
+- Reputation: BASE=50, MAX=100, STEP=5 (matches Foundry tests).
+- ABI drift-guarded: `src/__tests__/karma_contract.test.ts` re-reads the Foundry artifact and fails if the Solidity surface diverges from `src/lib/abi.ts`.
+
+Known residual gaps are documented in `docs/pattern-debt-registry.yaml` and exposed by the `super_mcp_pattern_debt` tool.
+
+---
+
+## What KARMA provides
+
+### Layer 0 — MCP runtime
+
+- MCP `stdio` transport for local clients.
+- Stateless HTTP MCP transport at `/mcp`.
+- Final local protocol target `rc2026`; legacy/compat modes are rejected.
+- `server/discover`, `tools/list`, `tools/call`, `tasks/get`, `tasks/update`, and `tasks/cancel` handlers.
+- Native Tasks-style long-running execution with durable task records.
+- Local filesystem, Redis, and memory storage drivers.
+- State/vault encryption-at-rest: `smcp:v4:kms` (primary with `KMS_PROVIDER`), `smcp:v3:hkdf-tenant` (default), `smcp:v2:scrypt` (fallback).
+- API key, JWT, and OIDC JWKS auth.
+- OAuth Resource Server metadata and resource-indicator enforcement.
+- Rate limiting, quota, idempotency, tenant execution locks, JSON Schema 2020-12 validation, timeout handling, output firewall, and telemetry.
+- Plugin governance with allowlists, SHA-256 hash pinning, manifest pinning, safe mode, capability declarations, and external plugin runner.
+- Runtime pattern-debt reporting through `super_mcp_pattern_debt`.
+- File/stdout/stderr JSONL telemetry and optional OpenTelemetry OTLP export.
+
+### Layer 1 — KARMA skill economy tools
+
+- **`karma_health`** — In-process runtime canary; confirms RPC and contract env presence.
+- **`register_skill`** — Broadcast `registerSkill(name, description, endpoint, price)` on-chain and upsert into the BM25 index.
+- **`discover_skills`** — BM25 free-text search (prefix + fuzzy) with reputation-boost ranking, `maxPriceWei` and `minReputation` filters.
+- **`create_job`** — Idempotent escrow: derives `taskHash(requester, skillId, nonce)`, checks existing before broadcast. Returns `exists` on replay, `confirmed`/`pending` on new.
+- **`deliver_result`** — Provider submits `resultHash` (bytes32) for an open job.
+- **`complete_job`** — Requester confirms; releases escrow to provider's withdrawable balance and bumps reputation.
+- **`get_agent_reputation`** — Read an agent's skills with reputation scores and invocation counts.
+- **`query_social_graph`** — Job edges for an agent (as provider and as requester).
+
+### Explicit non-claims
+
+- The external Node child-process plugin runner is best-effort hardening, not a true OS/container/microVM sandbox.
+- `karma.tool.ts` uses an in-process keystore singleton and is **not** safe in the external worker — `assertInProcess()` throws at startup in that path.
+- KMS-backed crypto-erasure is implemented but AWS KMS has a mandatory 7-day pending-deletion window.
+- KARMA is an OAuth Resource Server; it does not implement client-side PKCE or TokenManager flows.
+- The BM25 index is in-process and lost on restart; `SkillEventIndexer` rebuilds it from chain events on startup.
+
+---
+
+## Architecture
+
+```text
+Client
+  | stdio or HTTP /mcp
+  v
+Transport layer
+  |-- stdio: MCP StdioServerTransport
+  |-- HTTP: Express + stateless StreamableHTTPServerTransport
+  v
+HTTP safety layer (HTTP mode only)
+  |-- Host allowlist, CORS, body size
+  |-- API key / JWT / OIDC JWKS auth + resource indicator
+  |-- RequestContext resolution
+  |-- rc2026 Mcp-Method / Mcp-Name header checks
+  v
+Protocol adapter
+  |-- server/discover, tools/list, tools/call
+  |-- tasks/get, tasks/update, tasks/cancel
+  v
+Execution pipeline
+  |-- Plugin manifest stability
+  |-- Rate limit and quota
+  |-- Required scope check
+  |-- Confidence / elicitation guard
+  |-- Idempotency acquire / cache
+  |-- Tenant execution lock
+  |-- JSON Schema 2020-12 input/output validation
+  |-- Timeout / abort handling
+  |-- Output firewall
+  |-- State persistence
+  |-- Telemetry and optional OTEL spans
+  v
+Built-in plugin: karma.tool.ts (in-process, trusted)
+  |-- KarmaService (DI seam)
+  |   |-- keystoreManager (Web3 v3 keystore, private keys in-process only)
+  |   |-- BM25SkillIndex (MiniSearch, reputation-boosted, sanitized)
+  |   |-- contract.ts (viem public + wallet clients)
+  |       |-- writeContractBounded (exactly-once, pending on timeout)
+  |       |-- SkillEventIndexer (backfill + live-watch + reconnect)
+  v
+AgentSkillRegistry.sol (Pharos Atlantic, chainId=688689)
+  |-- registerSkill / deactivateSkill
+  |-- createJob (payable, escrow) / deliverResult / confirmCompletion / claimRefund
+  |-- pendingWithdrawals / withdraw
+  |-- getAgentSkills / getProviderJobs / getRequesterJobs
+  v
+Storage / telemetry
+  |-- memory / local filesystem / Redis
+  |-- smcp:v4:kms / smcp:v3:hkdf-tenant / smcp:v2:scrypt
+  |-- file / stdout / stderr / OTLP
+```
+
+---
+
+## Repository layout
+
+```text
+.
+├── Containerfile
+├── compose.yaml
+├── DEMO.md                          ← live demo results (Pharos Atlantic)
+├── package.json
+├── pnpm-lock.yaml
+├── tsconfig.json
+├── foundry.toml (or forge config)   ← Foundry for contract tests
+├── src/
+│   ├── check_gas.ts                 ← gas utility (untracked dev script)
+│   ├── index.ts
+│   ├── config/env.ts
+│   ├── core/
+│   │   ├── pattern_debt.ts
+│   │   ├── plugin_external_runner.ts
+│   │   ├── plugin_loader.ts
+│   │   ├── plugin_runner.ts
+│   │   ├── plugin_worker.ts
+│   │   ├── registrar.ts
+│   │   ├── runtime.ts
+│   │   ├── task_store.ts
+│   │   └── task_tracker.ts
+│   ├── http/
+│   │   ├── oauth_metadata.ts
+│   │   ├── security.ts
+│   │   └── server_card.ts
+│   ├── lib/                         ← KARMA app layer (Layer 1)
+│   │   ├── abi.ts                   ← typed ABI for AgentSkillRegistry.sol
+│   │   ├── bm25_index.ts            ← BM25SkillIndex (MiniSearch, incremental, sanitized)
+│   │   ├── contract.ts              ← Pharos viem clients, bounded write, exactly-once guard, SkillEventIndexer
+│   │   ├── karma_service.ts         ← KarmaService interface + realKarmaService
+│   │   ├── keystore.ts              ← KeystoreManager (Web3 v3 scrypt decrypt/encrypt)
+│   │   ├── serialize.ts             ← jsonSafe() — BigInt → string (D-6)
+│   │   └── types.ts                 ← AgentIdentity, CryptoV3, KeystoreFileV3, SkillDocument
+│   ├── mcp/adapter/
+│   │   ├── execution_pipeline.ts
+│   │   ├── mcp_protocol_adapter.ts
+│   │   ├── schema_guard.ts
+│   │   ├── task_runtime.ts
+│   │   └── tool_registry.ts
+│   ├── middlewares/
+│   │   ├── execution_lock.ts
+│   │   ├── guardrails.ts
+│   │   ├── idempotency.ts
+│   │   ├── output_firewall.ts
+│   │   ├── protocol_header.ts
+│   │   ├── quota.ts
+│   │   ├── rate_limit.ts
+│   │   └── vault.ts
+│   ├── plugins/
+│   │   ├── karma.tool.ts            ← KARMA skill economy (8 tools, trusted built-in)
+│   │   └── system.tool.ts           ← ping + pattern_debt + test_long_task
+│   ├── scripts/
+│   │   ├── check_connectivity.ts    ← verify Pharos Atlantic chainId/gasMode
+│   │   ├── deploy_contract.ts       ← deploy AgentSkillRegistry (keystore-signed)
+│   │   ├── fund_beta.ts             ← transfer PHRS alpha→beta (dev utility)
+│   │   ├── migrate_encryption.ts    ← re-encrypt pre-V4 blobs
+│   │   ├── run_demo.ts              ← 5-tx self-referential KARMA loop
+│   │   ├── setup_keystore.ts        ← generate multi-agent Web3 v3 keystore
+│   │   └── verify_demo.ts           ← read-only post-demo on-chain verification
+│   ├── security/
+│   │   ├── auth.ts
+│   │   ├── context.ts
+│   │   ├── policy.ts
+│   │   └── sanitize.ts
+│   ├── storage/
+│   │   ├── audit_store.ts
+│   │   ├── caching_key_registry.ts
+│   │   ├── encryption.ts
+│   │   ├── factory.ts
+│   │   ├── interface.ts
+│   │   ├── key_registry.ts
+│   │   ├── key_registry_factory.ts
+│   │   ├── local_fs.ts
+│   │   ├── memory.ts
+│   │   ├── providers/
+│   │   │   ├── aws_kms_key_registry.ts
+│   │   │   ├── gcp_kms_key_registry.ts
+│   │   │   ├── local_key_registry.ts
+│   │   │   └── vault_key_registry.ts
+│   │   ├── redis.ts
+│   │   └── redis_client.ts
+│   ├── telemetry/
+│   │   ├── factory.ts
+│   │   ├── file_logger.ts
+│   │   ├── interface.ts
+│   │   ├── otel.ts
+│   │   ├── redaction.ts
+│   │   ├── stderr_logger.ts
+│   │   └── stdout_logger.ts
+│   ├── types/schemas.ts
+│   └── __tests__/
+│       ├── bm25_index.test.ts
+│       ├── karma_builtin_plugin.test.ts
+│       ├── karma_contract.test.ts   ← ABI drift guard vs Foundry artifact
+│       ├── karma_exactly_once.test.ts
+│       ├── karma_indexer.test.ts
+│       ├── karma_plugin_health.test.ts
+│       ├── karma_tools.test.ts
+│       ├── karma_write_helper.test.ts
+│       ├── keystore.test.ts
+│       ├── serialize.test.ts
+│       └── ... (Layer 0 enterprise suites)
+```
+
+Important implementation files:
+
+| File | Purpose |
+| --- | --- |
+| `src/index.ts` | Server startup, HTTP/stdio transport, auth, graceful shutdown. |
+| `src/config/env.ts` | Environment schema, defaults, fail-fast production gates. |
+| `src/lib/abi.ts` | Typed ABI for `AgentSkillRegistry.sol`; drift-guard test in `karma_contract.test.ts`. |
+| `src/lib/bm25_index.ts` | `BM25SkillIndex` — MiniSearch, reputation-boosted ranking, BigInt-safe filters, prompt-injection sanitization. |
+| `src/lib/contract.ts` | Pharos viem clients; `runBoundedWrite` (exactly-once); `deriveTaskHash`/`findJobByTaskHash` (dedup guard); `SkillEventIndexer` (backfill + reconnect). |
+| `src/lib/karma_service.ts` | `KarmaService` interface (DI seam) + `realKarmaService` (live clients, keystore, index). |
+| `src/lib/keystore.ts` | `KeystoreManager` — Web3 v3 scrypt/aes-128-ctr decrypt; `encryptPrivateKeyV3` for keystore setup. |
+| `src/lib/serialize.ts` | `jsonSafe()` — recursive BigInt → decimal string (D-6). |
+| `src/lib/types.ts` | `AgentIdentity`, `CryptoV3`, `KeystoreFileV3`, `SkillDocument`. |
+| `src/plugins/karma.tool.ts` | 8 KARMA tools; trusted in-process built-in; `assertInProcess()` fail-fast. |
+| `src/plugins/system.tool.ts` | Built-in: `super_mcp_ping`, `super_mcp_pattern_debt`, `super_mcp_test_long_task`. |
+| `src/mcp/adapter/execution_pipeline.ts` | Tool call governance, native task execution, state save, telemetry. |
+| `src/core/task_store.ts` | Durable task store with local/memory/Redis and atomic input consume. |
+| `src/storage/encryption.ts` | Encryption-at-rest: `smcp:v4:kms`, `smcp:v3:hkdf-tenant`, `smcp:v2:scrypt`. |
+
+---
+
+## Requirements
+
+Recommended local runtime:
+
+- Node.js 20+.
+- pnpm 9.15.9.
+- Redis **8.2.2+** when `STORAGE_DRIVER=redis`. CVE-2025-49844 (Lua GC Use-After-Free, CVSS 10.0) affects Redis ≤ 8.2.1.
+- **Foundry** (`forge`) for running contract tests (`pnpm test:contract`). Install via `foundryup`.
+- A JWKS endpoint if using `MCP_AUTH_MODE=oidc_jwks`.
+- A funded Pharos Atlantic wallet for contract deployment and the demo.
+
+The `Containerfile` uses Node 20 Alpine and pnpm 9.15.9 in the builder stage.
+
+---
+
+## Install and validation
+
+```bash
+corepack enable
+corepack prepare pnpm@9.15.9 --activate
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm build
+pnpm test:enterprise
+pnpm audit --audit-level=high
+```
+
+To also run KARMA contract tests (requires Foundry):
+
+```bash
+pnpm test:contract
+```
+
+Development server:
+
+```bash
+pnpm dev
+```
+
+Production build and start:
+
+```bash
+pnpm build
+pnpm start
+```
+
+---
+
+## KARMA skill economy (Layer 1 + 2)
+
+KARMA's app layer adds an on-chain skill marketplace on top of the MCP runtime. Agents register skills (with price and endpoint), discover each other via BM25, and exchange value through an escrow job lifecycle:
+
+```text
+Agent A (provider)                        Agent B (requester)
+  register_skill ──────────────────────►  discover_skills
+         │                                      │
+         │               create_job ◄───────────┘  (escrows B's PHRS)
+         │                   │
+  deliver_result ◄───────────┘
+         │
+         └──────────────────────────────► complete_job  (releases escrow, bumps A's reputation)
+                                               │
+  withdraw ◄─────────────────────────────────┘
+```
+
+### KARMA tools
+
+| Tool | Type | Description |
+| --- | --- | --- |
+| `karma_health` | read-only | Canary: confirms in-process mode and presence of `PHAROS_RPC_URL` / `PHAROS_CONTRACT_ADDRESS`. |
+| `register_skill` | write | Broadcast `registerSkill` on-chain and upsert into BM25 index. Returns `pending` if receipt times out. |
+| `discover_skills` | read-only | BM25 free-text search (prefix + fuzzy 0.2, name boost ×2), reputation-boosted ranking, optional `maxPriceWei` and `minReputation` filters. |
+| `create_job` | write (idempotent) | Derive `taskHash(requester, skillId, idempotencyNonce)`, check existing before broadcast. Reply `exists` on replay. |
+| `deliver_result` | write | Provider submits `resultHash` (0x + 64 hex) for an open job. |
+| `complete_job` | write | Requester confirms; escrow credited to provider's withdrawable balance; reputation +5. |
+| `get_agent_reputation` | read-only | Agent's skills with `reputation`, `totalInvocations`, `active`. |
+| `query_social_graph` | read-only | Job edges for an agent: `asProvider` and `asRequester` arrays of job IDs. |
+
+### Required plugin configuration for the app layer
+
+`karma.tool.ts` **must** run in-process. The external child-process runner strips `process.env` and reinitializes module-level singletons (`keystoreManager`, `skillIndex`) empty on every call.
+
+```env
+MCP_PLUGIN_ALLOWLIST=system.tool.js,system.tool.ts,karma.tool.ts
+MCP_PLUGIN_ISOLATION_MODE=policy
+MCP_SAFE_MODE=false
+```
+
+`MCP_PLUGIN_ISOLATION_MODE=policy` ensures `karma.tool.ts` is treated as a trusted built-in and never dispatched to the external runner. `MCP_SAFE_MODE=false` is required because `karma.tool.ts` declares the `network` capability, which safe mode blocks.
+
+`assertInProcess()` inside every tool handler will throw immediately if the tool is somehow invoked in a worker environment (`KARMA_PLUGIN_WORKER=1`).
+
+### BigInt safety (D-6)
+
+All `uint256` amounts, skill IDs, and job IDs cross the MCP boundary as **decimal strings**. The `jsonSafe()` helper in `src/lib/serialize.ts` recursively converts every `BigInt` in `structuredContent` before the tool returns. Tool inputs accept wei amounts as base-10 strings validated by the `WEI` Zod schema.
+
+### BM25 index
+
+The in-process `BM25SkillIndex` (powered by MiniSearch) is rebuilt from chain events on startup via `SkillEventIndexer`:
+
+- `SkillRegistered` → `upsert(doc)` (sanitized name/description).
+- `SkillDeactivated` → `discard(skillId)`.
+- Ranking blends BM25 text score with on-chain `reputationScore` (0–100 → boost factor 1.0–2.0).
+- Price and reputation filters compare using `BigInt`/`Number` — no coercion of `uint256` through a JS number.
+- Skill name/description is sanitized before indexing: control characters, zero-width characters, BiDi overrides, and BOM are stripped; whitespace is collapsed; length is capped at 2000 characters. This prevents attacker-controlled skill metadata from smuggling hidden instructions to a discovering agent.
+
+---
+
+## Pharos Atlantic configuration
+
+Pharos Atlantic is the testnet used for the KARMA skill economy. Live-verified chain parameters:
+
+| Parameter | Value |
+| --- | --- |
+| Chain ID | `688689` |
+| Gas mode | EIP-1559 |
+| RPC | `https://atlantic.dplabs-internal.com` |
+| Explorer | `https://atlantic.pharosscan.xyz` |
+| Native currency | PHRS (18 decimals) |
+| Faucets | [Stakely](https://stakely.io/faucet/pharos-atlantic-testnet-phrs) · [gas.zip](https://www.gas.zip/faucet/pharos) · [Chainlink](https://faucets.chain.link/pharos-atlantic-testnet) |
+
+Verify live connectivity before deploying:
+
+```bash
+PHAROS_RPC_URL=https://atlantic.dplabs-internal.com pnpm check:connectivity
+```
+
+The script prints `chainId`, `gasMode`, `baseFeePerGas`, and optionally a deployer balance.
+
+Multicall3 is not verified deployed on Pharos Atlantic — the viem clients use batched JSON-RPC (`batchSize: 100`) instead of multicall as a safe reducer.
+
+Relevant env vars:
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `PHAROS_RPC_URL` | `https://atlantic.dplabs-internal.com` | Pharos Atlantic HTTP-RPC endpoint. |
+| `PHAROS_CHAIN_ID` | `688689` | Chain ID; `688688` appears in some docs but live chain returns `688689`. |
+| `PHAROS_CONTRACT_ADDRESS` | unset | Required for all contract interactions. Set after deploy. |
+| `PHAROS_EXPLORER` | `https://atlantic.pharosscan.xyz` | Used by `run_demo.ts` for explorer links. |
+
+---
+
+## Keystore management
+
+KARMA uses **Web3 Secret Storage v3** (scrypt + aes-128-ctr) for agent private keys. The `KeystoreManager` decrypts keys in-process at startup; raw private keys are never exposed — only viem `Account` objects (which sign internally).
+
+The keystore file format:
+
+```json
+{
+  "version": 3,
+  "agents": [
+    {
+      "agentId": "agent-alpha",
+      "address": "0x857c2F11...",
+      "crypto": { "cipher": "aes-128-ctr", "ciphertext": "...", ... }
+    }
+  ]
+}
+```
+
+### Generate a keystore
+
+```bash
+KEYSTORE_PATH=./keystore.json KEYSTORE_PASSWORD=<min-8-chars> \
+  pnpm setup:keystore agent-alpha agent-beta
+```
+
+If no agent IDs are given, defaults to `agent-alpha` and `agent-beta`. The script:
+- Generates fresh keypairs.
+- Encrypts each with scrypt (n=8192 for testnet speed; raise for production).
+- Writes to `KEYSTORE_PATH` with mode `0o600`.
+- Prints each address so you can fund from a faucet.
+
+Relevant env vars:
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `KEYSTORE_PATH` | `./keystore.json` | Path to the Web3 v3 keystore JSON. |
+| `KEYSTORE_PASSWORD` | unset | Password to unlock the keystore. Required for any write operation or the demo. |
+
+---
+
+## Deploying the contract
+
+The `AgentSkillRegistry` contract must be compiled with Foundry and deployed using `deploy_contract.ts`.
+
+### Prerequisites
+
+1. Install Foundry: `curl -L https://foundry.paradigm.xyz | bash && foundryup`
+2. Generate a keystore: `pnpm setup:keystore`
+3. Fund `agent-alpha` from a Pharos faucet.
+4. Compile: `forge build`
+5. Build TypeScript: `pnpm build`
+
+### Deploy
+
+```bash
+KEYSTORE_PASSWORD=<password> pnpm exec tsx src/scripts/deploy_contract.ts
+```
+
+The script:
+- Loads the keystore and `DEPLOYER_AGENT` (default: `agent-alpha`).
+- Reads bytecode from `out/AgentSkillRegistry.sol/AgentSkillRegistry.json` (Foundry artifact).
+- Simulates, broadcasts, and waits for the receipt.
+- Prints the deployed address.
+
+After deployment, record the address:
+
+```env
+PHAROS_CONTRACT_ADDRESS=0x<deployed-address>
+```
+
+### ABI drift guard
+
+`src/__tests__/karma_contract.test.ts` re-reads the Foundry artifact and fails if the Solidity function surface diverges from `src/lib/abi.ts`. Run it after any contract change:
+
+```bash
+pnpm test:contract           # Foundry tests for the Solidity logic
+vitest run src/__tests__/karma_contract.test.ts  # ABI structural drift check
+```
+
+---
+
+## Running the demo
+
+`DEMO.md` documents a completed 5-transaction self-referential loop on Pharos Atlantic. To reproduce:
+
+```bash
+# 1. Fund agent-alpha from faucet, then transfer a little to agent-beta:
+KEYSTORE_PASSWORD=<password> pnpm exec tsx src/scripts/fund_beta.ts
+
+# 2. Deploy the contract (if not already done):
+KEYSTORE_PASSWORD=<password> pnpm exec tsx src/scripts/deploy_contract.ts
+
+# 3. Set the contract address, then run the demo:
+PHAROS_CONTRACT_ADDRESS=0x<address> KEYSTORE_PASSWORD=<password> \
+  pnpm exec tsx src/scripts/run_demo.ts
+
+# 4. Verify the final on-chain state (read-only):
+PHAROS_CONTRACT_ADDRESS=0x<address> KEYSTORE_PASSWORD=<password> \
+  pnpm exec tsx src/scripts/verify_demo.ts
+```
+
+The demo loop:
+1. Alpha registers `discover_skills` as a paid skill (0.0001 PHRS).
+2. Beta escrows a job (`create_job` with idempotency nonce).
+3. Alpha delivers a result hash.
+4. Beta confirms completion (escrow credited to Alpha, reputation 50→55).
+5. Alpha withdraws the payout.
+
+Each step calls the real tool handler (`karma.tool.ts`) → `realKarmaService` → Pharos Atlantic on-chain.
+
+---
+
+## Quick start: stdio
+
+`stdio` is the default transport for local MCP clients that launch the server as a subprocess.
+
+Minimal local `.env` (MCP runtime only, no app layer):
+
+```env
+TRANSPORT_DRIVER=stdio
+STORAGE_DRIVER=fs
+MCP_SAFE_MODE=true
+MCP_PLUGIN_ALLOWLIST=system.tool.ts
+MCP_PLUGIN_ISOLATION_MODE=external
+```
+
+To also enable the KARMA skill economy plugin:
+
+```env
+TRANSPORT_DRIVER=stdio
+STORAGE_DRIVER=fs
+MCP_SAFE_MODE=false
+MCP_PLUGIN_ALLOWLIST=system.tool.ts,karma.tool.ts
+MCP_PLUGIN_ISOLATION_MODE=policy
+PHAROS_RPC_URL=https://atlantic.dplabs-internal.com
+PHAROS_CONTRACT_ADDRESS=0x<deployed-address>
+KEYSTORE_PATH=./keystore.json
+KEYSTORE_PASSWORD=<password>
+```
+
+Build and run:
+
+```bash
+pnpm build
+pnpm start
+```
+
+Example client config:
+
+```json
+{
+  "mcpServers": {
+    "karma": {
+      "command": "node",
+      "args": ["/absolute/path/to/KARMA/dist/index.js"],
+      "env": {
+        "TRANSPORT_DRIVER": "stdio",
+        "STORAGE_DRIVER": "fs",
+        "MCP_SAFE_MODE": "true"
+      }
+    }
+  }
+}
+```
+
+In stdio mode, telemetry defaults to `stderr` so stdout stays reserved for MCP protocol frames. `TELEMETRY_DRIVER=stdout` is rejected with `TRANSPORT_DRIVER=stdio`.
+
+---
+
+## Quick start: local HTTP
+
+HTTP mode exposes stateless MCP at `/mcp`, plus health and metadata endpoints.
+
+Local/dev HTTP with API key auth:
+
+```env
+NODE_ENV=development
+TRANSPORT_DRIVER=http
+HTTP_HOST=127.0.0.1
+HTTP_PORT=3333
+STORAGE_DRIVER=memory
+TELEMETRY_DRIVER=stderr
+
+MCP_AUTH_MODE=api_key
+MCP_API_KEY=change-this-to-a-random-string-with-at-least-32-chars
+
+ALLOWED_HOSTS=127.0.0.1:3333,localhost:3333
+ALLOWED_ORIGINS=http://localhost:3333
+MCP_SAFE_MODE=true
+```
+
+Start:
+
+```bash
+pnpm build
+pnpm start
+```
+
+Health checks:
+
+```bash
+curl http://127.0.0.1:3333/health/liveness
+curl http://127.0.0.1:3333/health/readiness
+```
+
+Discover metadata:
+
+```bash
+curl http://127.0.0.1:3333/.well-known/mcp.json
+curl http://127.0.0.1:3333/.well-known/mcp-server-card
+curl http://127.0.0.1:3333/.well-known/oauth-protected-resource
+```
+
+Example `tools/call` request:
+
+```bash
+curl -sS http://127.0.0.1:3333/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'x-api-key: change-this-to-a-random-string-with-at-least-32-chars' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: super_mcp_ping' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": "2",
+    "method": "tools/call",
+    "params": {
+      "name": "super_mcp_ping",
+      "arguments": {"message": "hello"}
+    }
+  }'
+```
+
+API key mode is rejected for production HTTP. Use JWT or OIDC JWKS for production.
+
+---
+
+## Production HTTP configuration
+
+Production means `NODE_ENV=production`.
+
+Minimum production requirements enforced by `src/config/env.ts`:
+
+- `STORAGE_DRIVER=redis` on Redis **8.2.2+** (CVE-2025-49844 patch required).
+- `REDIS_URL` set.
+- `MCP_ENCRYPTION_KEY` set.
+- `MCP_IDEMPOTENCY_SECRET` set (min 32 chars).
+- `TRANSPORT_DRIVER=http` must use `MCP_AUTH_MODE=jwt` or `MCP_AUTH_MODE=oidc_jwks`; `api_key` is rejected.
+- `ALLOWED_HOSTS` and `ALLOWED_ORIGINS` must be explicit and non-empty.
+- `ENABLE_RATE_LIMIT=true` and `ENABLE_QUOTA=true`, unless `MCP_ALLOW_UNLIMITED_HTTP=true` is set.
+- `MCP_ENABLE_TEST_TOOLS=false`.
+- Non-built-in plugins require `MCP_PLUGIN_SHA256_ALLOWLIST`, `MCP_EXTERNAL_PLUGIN_NODE_PERMISSION=true`, and `MCP_ALLOW_BEST_EFFORT_PLUGIN_SANDBOX=true`.
+
+Production HTTP + JWT shared secret:
+
+```env
+NODE_ENV=production
+TRANSPORT_DRIVER=http
+HTTP_HOST=0.0.0.0
+HTTP_PORT=3333
+
+STORAGE_DRIVER=redis
+REDIS_URL=redis://:password@redis:6379
+MCP_ENCRYPTION_KEY=base64url:<32-byte-base64url-key>
+
+MCP_AUTH_MODE=jwt
+MCP_JWT_SECRET=<at-least-32-chars>
+MCP_JWT_ISSUER=https://idp.example.com
+MCP_JWT_AUDIENCE=karma-api
+MCP_RESOURCE_URI=https://api.example.com/mcp
+MCP_AUTHORIZATION_SERVERS=https://idp.example.com
+
+ALLOWED_HOSTS=api.example.com
+ALLOWED_ORIGINS=https://app.example.com
+ENABLE_RATE_LIMIT=true
+ENABLE_QUOTA=true
+
+MCP_IDEMPOTENCY_SECRET=<random-string-at-least-32-chars>
+
+MCP_SAFE_MODE=false
+MCP_PLUGIN_ALLOWLIST=system.tool.js,karma.tool.js
+MCP_PLUGIN_ISOLATION_MODE=policy
+
+PHAROS_RPC_URL=https://atlantic.dplabs-internal.com
+PHAROS_CONTRACT_ADDRESS=0x<deployed-address>
+KEYSTORE_PATH=/run/secrets/keystore.json
+KEYSTORE_PASSWORD=<password>
+```
+
+---
+
+## MCP protocol behavior
+
+Protocol decisions:
+
+- `MCP_PROTOCOL_MODE` is a literal `rc2026`; other values fail config validation.
+- HTTP is stateless: each POST `/mcp` creates an ephemeral MCP server/transport connection.
+- HTTP clients must send `Mcp-Method` matching the JSON-RPC `method`.
+- `tools/call` requests must also send `Mcp-Name` matching `params.name`.
+- `server/discover` advertises protocol metadata, operation headers, tool metadata, and Tasks extension support.
+- Native Tasks methods are supported: `tasks/get`, `tasks/update`, `tasks/cancel`.
+- `tasks/list`, `check_task_status`, `isAsync`, and bespoke polling endpoints are intentionally not implemented.
+
+---
+
+## Authentication and request context
+
+HTTP requests are authenticated before protocol execution.
+
+Supported auth modes:
+
+| Mode | Env | Current use |
+| --- | --- | --- |
+| API key | `MCP_AUTH_MODE=api_key` | Local/dev HTTP only; rejected for production HTTP. |
+| JWT shared secret | `MCP_AUTH_MODE=jwt` | Symmetric deployments. Production requires issuer, audience, and resource URI. |
+| OIDC JWKS | `MCP_AUTH_MODE=oidc_jwks` | Remote IdP / OAuth Resource Server deployments. |
+
+### API key mode
+
+```env
+MCP_AUTH_MODE=api_key
+MCP_API_KEY=<at-least-32-chars>
+```
+
+Client header:
+
+```http
+x-api-key: <key>
+```
+
+### JWT mode
+
+```env
+MCP_AUTH_MODE=jwt
+MCP_JWT_SECRET=<at-least-32-chars>
+MCP_JWT_ISSUER=https://idp.example.com
+MCP_JWT_AUDIENCE=karma-api
+MCP_RESOURCE_URI=https://api.example.com/mcp
+```
+
+JWT context is derived from claims:
+
+| Context field | Claims |
+| --- | --- |
+| `tenantId` | `mcp_tenant_id` or `tenant_id`; required. |
+| `userId` | `sub` or `user_id`; fallback `jwt-user`. |
+| `clientId` | `azp` or `client_id`; fallback `jwt-client`. |
+| `scopes` | `scope` space-separated string or `scopes` array; capped at 32. |
+
+### OIDC JWKS mode
+
+```env
+MCP_AUTH_MODE=oidc_jwks
+MCP_JWKS_URI=https://idp.example.com/.well-known/jwks.json
+MCP_JWT_ISSUER=https://idp.example.com
+MCP_JWT_AUDIENCE=karma-api
+MCP_RESOURCE_URI=https://api.example.com/mcp
+```
+
+### Resource indicator enforcement
+
+When `MCP_RESOURCE_URI` is configured, JWT/OIDC tokens must carry `aud` equal to or containing `MCP_RESOURCE_URI`, or a `resource` claim equal to it.
+
+### Scopes
+
+Tools may declare `requiredScopes`. Missing scopes reject tool calls before the handler executes for all non-stdio auth types.
+
+---
+
+## Native Tasks
+
+KARMA supports native Tasks-style long-running execution.
+
+Supported methods:
+
+| Method | Purpose |
+| --- | --- |
+| `tasks/get` | Return task status, pending input requests, terminal result, error, or cancel reason. |
+| `tasks/update` | Provide `inputResponses` for a task that is `input_required`. |
+| `tasks/cancel` | Cancel a running or input-waiting task. |
+
+Task ownership is scoped by `tenantId + clientId + userId`. `tasks/update` is state-gated and nonce-bound — only valid while the task is `input_required`, using the current `inputRequestId`.
+
+---
+
+## Tool execution pipeline
+
+A tool call passes through these stages in `src/mcp/adapter/execution_pipeline.ts`:
+
+1. Resolve request context.
+2. Verify plugin manifest stability.
+3. Apply rate limit and quota.
+4. Enforce required scopes for all non-stdio auth types.
+5. Apply safe-mode/security policy checks.
+6. Validate JSON-serializable args for idempotency.
+7. Generate and acquire an idempotency key.
+8. Acquire a tenant execution lock.
+9. Validate input schema.
+10. Execute tool handler with timeout/abort signal.
+11. Validate output schema when present.
+12. Run output firewall over text and structured content.
+13. Save state.
+14. Commit idempotency result or short-TTL permanent error.
+15. Log telemetry and OTEL spans.
+
+---
+
+## Storage and encryption
+
+Storage drivers:
+
+| Driver | Env | Use |
+| --- | --- | --- |
+| Local filesystem | `STORAGE_DRIVER=fs` | Local/dev durable state. |
+| Redis | `STORAGE_DRIVER=redis` | Production durable state, tasks, idempotency, quota/rate data. |
+| Memory | `STORAGE_DRIVER=memory` | Tests and ephemeral local HTTP. |
+
+`MCP_ENCRYPTION_KEY` enables encryption-at-rest for state/vault blobs. Supported formats:
+
+- Passphrase-style secret: per-blob scrypt derivation to an A256GCM JWE key.
+- Raw key: `base64url:<32-byte-base64url-key>`.
+
+Envelope formats (priority order):
+
+```text
+smcp:v4:kms:<base64url-json-SealedBlob>             ← primary when KMS_PROVIDER is set
+smcp:v3:hkdf-tenant:<salt-base64url>:<compact-jwe>  ← primary without KMS_PROVIDER
+smcp:v2:scrypt:<salt-base64url>:<compact-jwe>       ← fallback (no tenantId)
+```
+
+KMS providers:
+
+| Provider | `KMS_PROVIDER` | Erasure model |
+| --- | --- | --- |
+| Local (dev/test only) | `local` | In-process; no real erasure. Rejected in production. |
+| HashiCorp Vault Transit | `vault` | Immediate (key deletion in Transit). |
+| AWS KMS | `aws-kms` | `DisableKey` (immediate) + `ScheduleKeyDeletion` (7-day mandatory). |
+| GCP Cloud KMS | `gcp-kms` | `DESTROY_SCHEDULED` (immediately unusable, 24 h permanent). |
+
+**Note on task record encryption:** Task records (including `lastClientInput.inputResponses`) are stored as plain JSON in Redis via `RedisTaskStore`. They are not covered by `MCP_ENCRYPTION_KEY` — that applies only to state and vault blobs. Ensure Redis is encrypted at rest and access-controlled at the infrastructure level.
+
+To migrate pre-V4 blobs:
+
+```bash
+KMS_PROVIDER=vault pnpm migrate:encryption
+```
+
+---
+
+## Rate limit, quota, idempotency, and locks
+
+Rate limit:
+
+```env
+ENABLE_RATE_LIMIT=true
+RATE_LIMIT_MAX_REQUESTS=100
+RATE_LIMIT_WINDOW_MS=60000
+```
+
+Quota:
+
+```env
+ENABLE_QUOTA=true
+QUOTA_DAILY_LIMIT=1000
+```
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `MCP_IDEMPOTENCY_WORKING_TTL_SECONDS` | `600` | TTL for in-progress idempotency records. |
+| `MCP_IDEMPOTENCY_RESULT_TTL_SECONDS` | `604800` (Redis), `3600` (non-Redis) | TTL for successful cached results. |
+| `MCP_IDEMPOTENCY_ERROR_TTL_SECONDS` | `300` | TTL for permanent error cache records. |
+| `MCP_LOCK_TTL_MS` | `420000` | Tenant execution lock TTL. |
+| `MCP_LOCK_ACQUIRE_DEADLINE_MS` | `420000` | Max wait to acquire tenant lock. |
+
+The KARMA bounded-write receipt timeout (`RECEIPT_TIMEOUT_MS=300_000`) is deliberately set below `MCP_LOCK_TTL_MS` so a slow transaction never outlives its execution lock.
+
+---
+
+## Output firewall
+
+The output firewall scans tool results before returning them and before committing idempotency results.
+
+Covered surfaces:
+
+- `content[].text`.
+- `structuredContent` recursively.
+
+Detected patterns include: private-key blocks, OpenAI-like keys, GitHub-like tokens, AWS access key IDs, Luhn-valid payment cards, SSN-like values, prompt-injection markers, and sensitive field names (`apiKey`, `secret`, `token`, `password`, `authorization`, `private_key`, and related variants).
+
+Strict PII mode (opt-in):
+
+```env
+MCP_OUTPUT_FIREWALL_PII_MODE=strict
+```
+
+Strict mode additionally redacts email and phone-like values.
+
+---
+
+## Plugin system
+
+Plugin files live in `src/plugins/`. Accepted filenames: `*.tool.ts` and `*.tool.js`.
+
+### Built-in plugins
+
+| Plugin | Notes |
+| --- | --- |
+| `system.tool.ts` | Always loaded. Provides `super_mcp_ping`, `super_mcp_pattern_debt`, and `super_mcp_test_long_task` (dev only). |
+| `karma.tool.ts` | KARMA skill economy. **Must** be trusted built-in (`MCP_PLUGIN_ISOLATION_MODE=policy`). Requires `MCP_SAFE_MODE=false`. |
+
+### `karma.tool.ts` isolation requirement
+
+`karma.tool.ts` must **not** be loaded through the external child-process runner:
+
+- `keystoreManager` is a module singleton loaded once at startup; the external runner reinitializes it empty every call.
+- `skillIndex` is a module singleton; the external runner loses all indexed documents.
+- `process.env.PHAROS_*` and `process.env.KEYSTORE_*` are stripped by `workerEnv()` in the external runner.
+- `assertInProcess()` in every handler throws if `KARMA_PLUGIN_WORKER=1` (the worker bootstrap sets this).
+
+Required configuration:
+
+```env
+MCP_PLUGIN_ALLOWLIST=system.tool.js,system.tool.ts,karma.tool.ts
+MCP_PLUGIN_ISOLATION_MODE=policy
+MCP_SAFE_MODE=false
+```
+
+### SHA-256 allowlist (production non-built-in plugins)
+
+```env
+MCP_PLUGIN_SHA256_ALLOWLIST=my_plugin.tool.js:<sha256>
+```
+
+Required in production for any plugin that is not `system.tool` or `karma.tool`.
+
+### Isolation modes
+
+| Mode | Behavior |
+| --- | --- |
+| `external` | Non-built-in plugins run through `ChildProcessPluginRunner`. |
+| `policy` | Trusted-only mode. Non-built-in plugins are rejected. Required for `karma.tool.ts`. |
+
+---
+
+## Writing plugins
+
+A plugin exports a `ToolDefinition[]` as `default` or `tools`.
+
+Minimal plugin example:
+
+```ts
+import { z } from "zod/v4";
+import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
+
+const tools: ToolDefinition[] = [
+  {
+    name: "example_echo",
+    description: "Echo an input message.",
+    inputSchema: { message: z.string().min(1) },
+    allowedPhases: ["intake", "execution", "review", "completed"],
+    capabilities: [],
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    execution: { taskSupport: "forbidden" },
+    handler: async (args) => {
+      const input = args as { message: string };
+      return {
+        content: [{ type: "text", text: input.message }],
+        structuredContent: { echoed: input.message },
+      };
+    },
+  },
+];
+
+export default tools;
+```
+
+---
+
+## HTTP endpoints and headers
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/mcp` | POST | Stateless MCP JSON-RPC endpoint. |
+| `/mcp` | GET/DELETE | Rejected with 405 in stateless HTTP mode. |
+| `/health/liveness` | GET | Basic liveness. |
+| `/health/readiness` | GET | Runtime/storage readiness. |
+| `/.well-known/mcp.json` | GET | Server card. |
+| `/.well-known/mcp-server-card` | GET | Server card alias. |
+| `/.well-known/oauth-protected-resource` | GET | OAuth protected resource metadata. |
+
+Required HTTP `/mcp` headers:
+
+```http
+Content-Type: application/json
+Mcp-Method: <json-rpc-method>
+Mcp-Name: <params.name>   (tools/call only)
+```
+
+---
+
+## Docker / Compose
+
+Build the image:
+
+```bash
+docker build -f Containerfile -t karma:local .
+```
+
+`compose.yaml` includes Redis and a hardened server container with read-only filesystem, `/tmp` tmpfs, dropped Linux capabilities, `no-new-privileges`, pid and memory limits.
+
+A production-compatible JWT `.env` for Compose:
+
+```env
+REDIS_PASSWORD=change-this-redis-password
+MCP_ENCRYPTION_KEY=base64url:<32-byte-base64url-key>
+MCP_IDEMPOTENCY_SECRET=change-this-idempotency-secret-at-least-32-chars
+
+MCP_AUTH_MODE=jwt
+MCP_JWT_SECRET=change-this-jwt-secret-with-at-least-32-chars
+MCP_JWT_ISSUER=https://idp.example.com
+MCP_JWT_AUDIENCE=karma-api
+MCP_RESOURCE_URI=https://api.example.com/mcp
+MCP_AUTHORIZATION_SERVERS=https://idp.example.com
+
+ALLOWED_HOSTS=api.example.com
+ALLOWED_ORIGINS=https://app.example.com
+
+PHAROS_CONTRACT_ADDRESS=0x<deployed-address>
+```
+
+Run:
+
+```bash
+docker compose up --build
+```
+
+---
+
+## Configuration reference
+
+All Layer 0 configuration is read in `src/config/env.ts`. KARMA app-layer env vars are read directly in `src/lib/contract.ts` and `src/plugins/karma.tool.ts`.
+
+### Core runtime
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `TRANSPORT_DRIVER` | `stdio` | `stdio` or `http`. |
+| `HTTP_HOST` | `127.0.0.1` | HTTP bind host. |
+| `HTTP_PORT` | `3333` | HTTP bind port. |
+| `MCP_PROTOCOL_MODE` | `rc2026` | Only supported value. |
+| `MCP_PROJECT_ID` | `super_mcp_default` | Namespace for Redis/vault keys. |
+| `MCP_TENANT_ID` | `tenant_local` | Local/stdio fallback tenant. |
+| `MCP_SAFE_MODE` | `true` | Blocks `network` capability tools (including all KARMA tools). Set `false` to enable app layer. |
+| `MCP_TOOL_TIMEOUT_MS` | `300000` | Per-tool timeout. |
+
+### Pharos / KARMA app layer
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `PHAROS_RPC_URL` | `https://atlantic.dplabs-internal.com` | Pharos Atlantic HTTP-RPC. |
+| `PHAROS_CHAIN_ID` | `688689` | Live-verified chain ID. |
+| `PHAROS_CONTRACT_ADDRESS` | unset | Required for all contract calls. Deploy first. |
+| `PHAROS_EXPLORER` | `https://atlantic.pharosscan.xyz` | Explorer base URL for demo links. |
+| `KEYSTORE_PATH` | `./keystore.json` | Web3 v3 keystore file (multi-agent). |
+| `KEYSTORE_PASSWORD` | unset | Keystore decryption password. Required for write ops. |
+| `DEMO_PRICE_WEI` | `100000000000000` | Default skill price for `run_demo.ts`. |
+
+### HTTP security
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `ALLOWED_HOSTS` | empty | Required in HTTP mode. |
+| `ALLOWED_ORIGINS` | empty | Required in HTTP mode. |
+| `MCP_HTTP_BODY_LIMIT` | `100kb` | Express JSON body limit. |
+| `MCP_TRUST_IDENTITY_HEADERS` | `false` | Trust upstream `x-mcp-*` identity headers only behind a trusted gateway. |
+
+### Authentication
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `MCP_AUTH_MODE` | `api_key` | `api_key`, `jwt`, `oidc_jwks`. Production HTTP rejects `api_key`. |
+| `MCP_API_KEY` | unset | Required for API-key HTTP, minimum 32 chars. |
+| `MCP_JWT_SECRET` | unset | Required for JWT HTTP, minimum 32 chars. |
+| `MCP_JWT_ISSUER` | unset | Optional for dev JWT; required for production JWT and all OIDC. |
+| `MCP_JWT_AUDIENCE` | unset | Optional for dev JWT; required for production JWT and all OIDC. |
+| `MCP_JWKS_URI` | unset | Required for HTTP OIDC JWKS. Must be URL. |
+| `MCP_JWKS_ALLOWLIST` | empty | Comma-separated hostname allowlist for JWKS fetches. |
+| `MCP_JWT_MAX_AGE_SECONDS` | `3600` | Maximum accepted token age. |
+| `MCP_RESOURCE_URI` | unset | Required for production JWT/OIDC HTTP. |
+| `MCP_AUTHORIZATION_SERVERS` | empty | Comma-separated authorization servers. |
+
+### Storage and encryption
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `STORAGE_DRIVER` | `fs` | `fs`, `redis`, or `memory`. Production requires `redis`. |
+| `REDIS_URL` | unset | Required when `STORAGE_DRIVER=redis`. |
+| `MCP_ENCRYPTION_KEY` | unset | Enables encryption. Required with Redis. |
+| `MCP_ALLOW_LEGACY_SHA256_KDF` | `false` | One-time migration waiver. |
+| `MCP_REQUIRE_CRYPTO_ERASURE` | `false` | Production fail-closed flag; requires real KMS provider. |
+
+### KMS and crypto-erasure
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `KMS_PROVIDER` | unset | `vault`, `aws-kms`, `gcp-kms`, or `local`. `local` rejected in production. |
+| `VAULT_ADDR` | unset | Required when `KMS_PROVIDER=vault`. |
+| `VAULT_TOKEN` | unset | Required when `KMS_PROVIDER=vault`. |
+| `AWS_KMS_REGION` | unset | Required when `KMS_PROVIDER=aws-kms`. |
+| `GCP_KMS_PROJECT` | unset | Required when `KMS_PROVIDER=gcp-kms`. |
+| `GCP_KMS_KEYRING` | unset | Required when `KMS_PROVIDER=gcp-kms`. |
+
+### Telemetry
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `TELEMETRY_DRIVER` | `stderr` (stdio), `file` (HTTP) | `file`, `stdout`, `stderr`. `stdout` forbidden with stdio. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Enables OTLP export when configured. |
+
+### Abuse controls
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `ENABLE_RATE_LIMIT` | `false` | Production HTTP requires `true` unless waived. |
+| `RATE_LIMIT_MAX_REQUESTS` | `100` | Requests per window. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Window duration in ms. |
+| `ENABLE_QUOTA` | `false` | Production HTTP requires `true` unless waived. |
+| `QUOTA_DAILY_LIMIT` | `1000` | Daily tenant quota. |
+| `MCP_ALLOW_UNLIMITED_HTTP` | `false` | Explicit production waiver for disabling rate/quota startup requirement. |
+
+### Idempotency and locks
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `MCP_LOCK_TTL_MS` | `420000` | Tenant lock TTL. |
+| `MCP_LOCK_ACQUIRE_DEADLINE_MS` | `420000` | Max wait to acquire tenant lock. |
+| `MCP_IDEMPOTENCY_SECRET` | unset | Min-32-char HMAC secret. **Required when `STORAGE_DRIVER=redis`.** |
+
+### Plugin loading and runner
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `MCP_PLUGIN_ALLOWLIST` | `system.tool.js,system.tool.ts` | Comma-separated plugin filenames. Add `karma.tool.ts` for the app layer. |
+| `MCP_PLUGIN_ISOLATION_MODE` | `external` | `external` or `policy`. Use `policy` when `karma.tool.ts` is enabled. |
+| `MCP_PLUGIN_SHA256_ALLOWLIST` | empty | `filename:sha256` hash pins. Required in production for non-built-in plugins. |
+| `MCP_PLUGIN_AUTO_DISCOVERY` | `false` | Auto-load matching plugin files (requires unsafe waiver). |
+| `MCP_ALLOW_BEST_EFFORT_PLUGIN_SANDBOX` | `false` | Production waiver for non-built-in plugins before real sandbox exists. |
+| `MCP_EXTERNAL_PLUGIN_TIMEOUT_MS` | `30000` | Child runner timeout. |
+| `MCP_EXTERNAL_PLUGIN_NETWORK_POLICY` | `deny` | `deny` or `allow`. |
+| `MCP_EXTERNAL_PLUGIN_FS_POLICY` | `read-only` | `read-only` or `allow`. |
+| `MCP_EXTERNAL_PLUGIN_NODE_PERMISSION` | `false` | Optional Node Permission Model hardening. |
+
+### Secrets and output firewall
+
+| Variable | Default | Notes |
+| --- | ---: | --- |
+| `MCP_SECRET_ALLOWLIST` | empty | Secret names available through the credential vault. |
+| `MCP_OUTPUT_FIREWALL_PII_MODE` | `credentials_only` | `credentials_only` or `strict`. |
+
+---
+
+## Testing and quality gates
+
+Current package scripts:
+
+```json
+{
+  "dev": "tsx watch src/index.ts",
+  "build": "tsc -p tsconfig.json",
+  "start": "node dist/index.js",
+  "test": "vitest run src",
+  "typecheck": "tsc -p tsconfig.json --noEmit",
+  "lint": "eslint src",
+  "lint:fix": "eslint src --fix",
+  "lint:strict": "eslint src --max-warnings 0",
+  "ci": "pnpm typecheck && pnpm lint && pnpm test",
+  "audit": "pnpm audit --audit-level=high",
+  "deps:check": "pnpm outdated",
+  "migrate:encryption": "tsx src/scripts/migrate_encryption.ts",
+  "check:connectivity": "tsx src/scripts/check_connectivity.ts",
+  "setup:keystore": "tsx src/scripts/setup_keystore.ts",
+  "test:contract": "forge test",
+  "test:enterprise": "vitest run src/__tests__/task_runtime.test.ts ... (see package.json)"
+}
+```
+
+Recommended pre-merge validation:
+
+```bash
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm typecheck
+pnpm build
+pnpm test:enterprise
+pnpm test:plugin:lifecycle
+pnpm test:plugin:permission
+pnpm test:contract
+pnpm audit --audit-level=high
+```
+
+### Enterprise coverage areas (Layer 0)
+
+- Native Tasks state machine and nonce-bound input.
+- JWT/OIDC authentication with real JWTs.
+- Request context sanitization and trusted identity header behavior.
+- HTTP host/CORS/content-type/protocol-header checks.
+- OAuth protected resource metadata.
+- Rate limit/quota production gates.
+- Idempotency and execution locks.
+- Output firewall and strict PII mode.
+- Storage encryption negative cases.
+- Vault/secret access policy.
+- Plugin policy and best-effort isolation behavior.
+- Pattern debt registry consistency.
+
+### KARMA app-layer test suites
+
+| Test file | Coverage |
+| --- | --- |
+| `karma_builtin_plugin.test.ts` | Plugin loads as trusted built-in; `assertInProcess` canary. |
+| `karma_contract.test.ts` | ABI structural drift guard vs Foundry artifact. |
+| `karma_exactly_once.test.ts` | `deriveTaskHash` / `findJobByTaskHash` exactly-once dedup logic. |
+| `karma_indexer.test.ts` | `SkillEventIndexer` backfill, reconnect, heartbeat state machine. |
+| `karma_plugin_health.test.ts` | `karma_health` tool: env detection, in-process flag. |
+| `karma_tools.test.ts` | All 7 economy tools over a fake `KarmaService`. |
+| `karma_write_helper.test.ts` | `runBoundedWrite` confirmed/pending/revert paths. |
+| `bm25_index.test.ts` | `BM25SkillIndex`: upsert, discard, search, reputation boost, price filter, sanitize. |
+| `keystore.test.ts` | Web3 v3 decrypt/encrypt round-trip; MAC mismatch; wrong KDF/cipher. |
+| `serialize.test.ts` | `jsonSafe` BigInt, nested, array paths. |
+| `schema_guard.test.ts` | JSON Schema 2020-12 input/output validation. |
+
+Additional suites (run via `pnpm test` or individually):
+
+- `encryption_kms.test.ts` — V4 KMS envelope paths.
+- `caching_key_registry.test.ts` — DEK cache TTL, use-count, zeroed-on-eviction.
+- `audit_store.test.ts` — `FileAuditStore` JSONL append.
+- `local_key_registry.test.ts`, `vault_key_registry.test.ts`, `gcp_kms_key_registry.test.ts` — KMS providers.
+- `holyseed_patterns.test.ts` — Sensitive-pattern detection.
+- `registrar_governance.test.ts` — Plugin/tool registration governance.
+- `sanitize.test.ts`, `otel.test.ts`, `file_logger.test.ts`, `tool_metadata.test.ts` — Supporting subsystems.
+
+---
+
+## Pattern debt and limitations
+
+KARMA keeps residual security/design debt visible instead of hiding it.
+
+Runtime report tool: `super_mcp_pattern_debt`
+
+Docs: `docs/pattern-debt-registry.yaml`, `docs/phase5-pattern-debt.md`, `docs/test-coverage-matrix.md`
+
+Current debt summary:
+
+| Debt | Status | Current truth |
+| --- | --- | --- |
+| `DEBT-001-plugin-os-isolation` | Open, release-blocking | Current runner is child-process best-effort only. No container, Wasmtime, or microVM boundary. Production non-built-in plugin config fails closed unless explicitly waived. |
+| `DEBT-002-crypto-erasure` | Implemented | `smcp:v4:kms` envelope shipped 2026-06-14. Four KMS providers. `MCP_REQUIRE_CRYPTO_ERASURE=true` requires real KMS provider. |
+| `DEBT-003-native-mcp-tasks` | Monitoring | Custom Tasks adapter remains isolated until the TypeScript SDK exposes stable public Tasks APIs. |
+| `DEBT-004-oauth-resource-indicator` | Implemented | JWT/OIDC resource indicator enforced when configured. |
+| `DEBT-005-output-firewall-coverage` | Partially resolved | Structured redaction implemented. No DLP/classifier backend. |
+| `DEBT-006-redis-trauma-registry` | Implemented | Redis/memory rate limiters use bounded violation records with severity EMA/backoff. |
+
+Non-goals intentionally preserved:
+
+- No fake DLP backend.
+- No TokenManager or server-side PKCE.
+- No `karma.tool.ts` in the external child-process runner (in-process only by design).
+- No claim that child process or Node Permission Model equals OS/container sandboxing.
+- `RECEIPT_TIMEOUT_MS` is a bounded wait for a broadcast tx; timed-out transactions are on the wire and must not be resent.
+
+---
+
+## Troubleshooting
+
+### `pnpm lint` fails
+
+Check ESLint output for style or formatting errors in `src`.
+
+### Production HTTP exits with `MCP_AUTH_MODE=api_key is for local/dev only`
+
+Production HTTP rejects API key mode. Use `MCP_AUTH_MODE=jwt` or `MCP_AUTH_MODE=oidc_jwks`.
+
+### `[KARMA] PHAROS_CONTRACT_ADDRESS not set`
+
+Deploy `AgentSkillRegistry` first and record the address in `.env`:
+
+```env
+PHAROS_CONTRACT_ADDRESS=0x<deployed-address>
+```
+
+### `[KARMA] karma.tool.ts must run in-process`
+
+`assertInProcess()` threw because the tool was invoked in the external child-process runner. Set:
+
+```env
+MCP_PLUGIN_ISOLATION_MODE=policy
+```
+
+### `[KARMA] Agent not found in keystore: agent-alpha`
+
+The keystore was not loaded, or the agent ID does not exist in the keystore file. Ensure:
+
+- `KEYSTORE_PATH` points to a valid keystore file.
+- `KEYSTORE_PASSWORD` is correct.
+- The agent ID was generated with `pnpm setup:keystore`.
+
+### `[KARMA] Keystore MAC mismatch`
+
+Wrong `KEYSTORE_PASSWORD` or corrupt keystore file.
+
+### `karma_health` returns `rpcEnv=false` or `contractEnv=false`
+
+Set `PHAROS_RPC_URL` and `PHAROS_CONTRACT_ADDRESS` in the environment.
+
+### `create_job` returns `status: "exists"`
+
+This is correct idempotent behavior. The same `(requester, skillId, idempotencyNonce)` triple was already used. Use a new nonce for a new job.
+
+### `create_job` or `register_skill` returns `status: "pending"`
+
+The transaction was broadcast but the receipt did not arrive before `RECEIPT_TIMEOUT_MS=300_000`. The transaction is on the wire — **do not resend**. Poll the explorer for the tx hash from the response, or retry with the same `idempotencyNonce` (which will detect the existing job via `findJobByTaskHash` once confirmed).
+
+### `discover_skills` returns 0 results after restart
+
+The in-process BM25 index is rebuilt from `SkillEventIndexer` on startup. Wait for the indexer to finish backfilling, or call `karma_health` to check `lastIndexedBlock`. If the indexer never started, ensure `PHAROS_CONTRACT_ADDRESS` is set and the contract is accessible.
+
+### `MCP_SAFE_MODE=true` blocks `karma_health` and all economy tools
+
+All KARMA tools declare the `network` capability, which safe mode blocks. Set:
+
+```env
+MCP_SAFE_MODE=false
+```
+
+### Deployer has 0 balance
+
+Fund `agent-alpha` from a Pharos Atlantic faucet before deploying:
+
+- [Stakely](https://stakely.io/faucet/pharos-atlantic-testnet-phrs)
+- [gas.zip](https://www.gas.zip/faucet/pharos)
+- [Chainlink](https://faucets.chain.link/pharos-atlantic-testnet)
+
+### `forge test` fails with missing dependencies
+
+Run `forge install` to install OpenZeppelin contracts, then rebuild:
+
+```bash
+forge install
+forge build
+```
+
+### Production HTTP exits because rate limit or quota is missing
+
+Set `ENABLE_RATE_LIMIT=true` and `ENABLE_QUOTA=true`, or explicitly set `MCP_ALLOW_UNLIMITED_HTTP=true` as a documented waiver.
+
+### HTTP returns `403 Invalid Host`
+
+Set `ALLOWED_HOSTS` to include the exact Host header, including port:
+
+```env
+ALLOWED_HOSTS=127.0.0.1:3333,localhost:3333
+```
+
+### JWT/OIDC request returns `401 Unauthorized`
+
+Check issuer, audience, resource URI, tenant claim, scopes, and token age (`MCP_JWT_MAX_AGE_SECONDS`, default 3600).
+
+### `tasks/update` returns `Task is not waiting for input`
+
+The task is not currently `input_required`. Poll `tasks/get` first.
+
+### Redis Lua operations fail or behave incorrectly
+
+Upgrade Redis to **8.2.2 or later**. CVE-2025-49844 (Lua GC Use-After-Free, CVSS 10.0) affects Redis ≤ 8.2.1.
+
+### `MCP_REQUIRE_CRYPTO_ERASURE=true` causes fatal startup
+
+In production, this requires `KMS_PROVIDER=vault`, `aws-kms`, or `gcp-kms`. `local` is rejected.
+
+---
+
+## License
+
+See `LICENSE` in the repository.
+
+---
+
+## Maintainer notes
+
+Recommended next work:
+
+- Implement a true container/Wasmtime/microVM plugin runner before supporting untrusted third-party plugins in production (`DEBT-001`, release-blocking).
+- Add `AwsKmsKeyRegistry` unit tests — requires a live AWS KMS endpoint or LocalStack mock.
+- Run `pnpm migrate:encryption` once per tenant after enabling `KMS_PROVIDER` to re-encrypt all pre-V4 blobs before offering a formal erasure SLA.
+- Keep monitoring MCP TypeScript SDK public Tasks support before replacing the local adapter (`DEBT-003`, monitoring).
+- The `SkillEventIndexer` currently uses `fromBlock=0n` on restart (full backfill). Add a persisted `lastIndexedBlock` checkpoint to reduce startup time as the chain grows.
+- `fund_beta.ts` contains a hardcoded password (`KarmaTestPassword2026!`) — do not commit to production; use `KEYSTORE_PASSWORD` env var.
+- Add `AwsKmsKeyRegistry` unit tests with LocalStack.
