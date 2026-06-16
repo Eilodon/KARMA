@@ -80,7 +80,7 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 - Eight in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `get_agent_reputation`, `query_social_graph`.
 - Web3 Secret Storage v3 keystore (`KeystoreManager`): scrypt + aes-128-ctr in-process decrypt. Private keys never exposed — only viem `Account` objects.
 - In-process BM25 skill index (`BM25SkillIndex` via MiniSearch): reputation-boosted ranking, BigInt-safe price/reputation filters, prompt-injection-resistant text sanitization.
-- `SkillEventIndexer`: backfill + live-watch + reconnect on error. Heartbeat surfaced via `karma_health`.
+- `SkillEventIndexer`: backfill + live-watch + reconnect on error. Health state (`lastIndexedBlock`, `lastEventAt`, `watching`) available via `SkillEventIndexer.health()` — not yet wired to a tool endpoint.
 - Bounded write helper: exactly-once broadcast with `RECEIPT_TIMEOUT_MS=300_000 < MCP_LOCK_TTL_MS=420_000`. Timeout → `pending` outcome; never resend.
 - Exactly-once job guard: `deriveTaskHash(requester, skillId, nonce)` → check-before-write via `findJobByTaskHash`. No double-escrow on lost-ACK retry.
 - All `uint256` amounts and IDs cross the MCP boundary as decimal strings (`jsonSafe`, D-6).
@@ -93,7 +93,7 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 - Reputation: BASE=50, MAX=100, STEP=5 (matches Foundry tests).
 - ABI drift-guarded: `src/__tests__/karma_contract.test.ts` re-reads the Foundry artifact and fails if the Solidity surface diverges from `src/lib/abi.ts`.
 
-Known residual gaps are documented in `docs/pattern-debt-registry.yaml` and exposed by the `super_mcp_pattern_debt` tool.
+Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried live by `super_mcp_pattern_debt`) and `docs/superpowers/pattern-debt.md` (KARMA app layer).
 
 ---
 
@@ -201,7 +201,7 @@ Storage / telemetry
 ├── package.json
 ├── pnpm-lock.yaml
 ├── tsconfig.json
-├── foundry.toml (or forge config)   ← Foundry for contract tests
+├── foundry.toml                     ← Foundry for contract tests
 ├── src/
 │   ├── check_gas.ts                 ← gas utility (untracked dev script)
 │   ├── index.ts
@@ -1313,20 +1313,34 @@ Additional suites (run via `pnpm test` or individually):
 
 KARMA keeps residual security/design debt visible instead of hiding it.
 
-Runtime report tool: `super_mcp_pattern_debt`
+Runtime report tool: `super_mcp_pattern_debt` (reads from `src/core/pattern_debt.ts` at runtime).
 
-Docs: `docs/pattern-debt-registry.yaml`, `docs/phase5-pattern-debt.md`, `docs/test-coverage-matrix.md`
+Debt registries:
+- `src/core/pattern_debt.ts` — Layer 0 runtime items DEBT-001 to DEBT-006, queried live by `super_mcp_pattern_debt`.
+- `docs/superpowers/pattern-debt.md` — KARMA app-layer items PD-001 to PD-003, tracked separately.
 
-Current debt summary:
+### Layer 0 debt (DEBT-001 to DEBT-006)
+
+Authoritative source: `src/core/pattern_debt.ts`. The table below reflects the **codebase state** as of 2026-06-16; note that `pattern_debt.ts` DEBT-002 entry is stale (the V4 KMS implementation ships in `src/storage/providers/` but the registry text hasn't been updated).
 
 | Debt | Status | Current truth |
 | --- | --- | --- |
-| `DEBT-001-plugin-os-isolation` | Open, release-blocking | Current runner is child-process best-effort only. No container, Wasmtime, or microVM boundary. Production non-built-in plugin config fails closed unless explicitly waived. |
-| `DEBT-002-crypto-erasure` | Implemented | `smcp:v4:kms` envelope shipped 2026-06-14. Four KMS providers. `MCP_REQUIRE_CRYPTO_ERASURE=true` requires real KMS provider. |
-| `DEBT-003-native-mcp-tasks` | Monitoring | Custom Tasks adapter remains isolated until the TypeScript SDK exposes stable public Tasks APIs. |
-| `DEBT-004-oauth-resource-indicator` | Implemented | JWT/OIDC resource indicator enforced when configured. |
-| `DEBT-005-output-firewall-coverage` | Partially resolved | Structured redaction implemented. No DLP/classifier backend. |
-| `DEBT-006-redis-trauma-registry` | Implemented | Redis/memory rate limiters use bounded violation records with severity EMA/backoff. |
+| `DEBT-001-plugin-os-isolation` | **Open, release-blocking** | Current runner is child-process best-effort only. No container, Wasmtime, or microVM boundary. Production non-built-in plugin config fails closed unless explicitly waived. |
+| `DEBT-002-crypto-erasure` | **Implemented** (registry stale) | `smcp:v4:kms` envelope and four KMS providers (`Local`, `Vault`, `AWS KMS`, `GCP KMS`) shipped 2026-06-14. `MCP_REQUIRE_CRYPTO_ERASURE=true` requires real KMS provider. `src/core/pattern_debt.ts` still shows this as open — the registry text predates V4. |
+| `DEBT-003-native-mcp-tasks` | **Monitoring** | Custom Tasks adapter remains isolated until the TypeScript SDK exposes stable public Tasks APIs. |
+| `DEBT-004-oauth-resource-indicator` | **Implemented** | JWT/OIDC resource indicator enforced when configured; production requires resource URI. |
+| `DEBT-005-output-firewall-coverage` | **Partially resolved** | Structured redaction implemented with deterministic patterns and limits. No DLP/classifier backend. |
+| `DEBT-006-redis-trauma-registry` | **Implemented** | Redis/memory rate limiters use bounded violation records with severity EMA/backoff. |
+
+### KARMA app-layer debt (PD-001 to PD-003)
+
+Documented in `docs/superpowers/pattern-debt.md`.
+
+| Debt | Status | Current truth |
+| --- | --- | --- |
+| `PD-001` — pre-existing Layer-0 test failures | **Resolved** (2026-06-16, commit `db7ea72`) | 8 stale tests aligned to post-hardening code; 1 env-locked test skip-guarded. Full suite: 315 passed, 1 skipped, 0 failed. |
+| `PD-002` — network glue has live-only coverage | **Open** | `writeContractBounded`, `realKarmaService` reads, and `startSkillIndexer` have no automated test. Decoupled policy cores are unit-tested; viem/keystore wiring is verified only by the live P7 demo. |
+| `PD-003` — exactly-once guard is O(n) scan | **Open** | `findJobByTaskHash` scans all of `getRequesterJobs(requester)` per `create_job` call. Correct at demo scale; degrades as requester accumulates jobs. Resolution: add on-chain `jobByTaskHash` mapping in contract v2 when `jobCount() > 1000` or any requester owns > 100 jobs. |
 
 Non-goals intentionally preserved:
 
@@ -1390,7 +1404,7 @@ The transaction was broadcast but the receipt did not arrive before `RECEIPT_TIM
 
 ### `discover_skills` returns 0 results after restart
 
-The in-process BM25 index is rebuilt from `SkillEventIndexer` on startup. Wait for the indexer to finish backfilling, or call `karma_health` to check `lastIndexedBlock`. If the indexer never started, ensure `PHAROS_CONTRACT_ADDRESS` is set and the contract is accessible.
+The in-process BM25 index is rebuilt from `SkillEventIndexer` on startup. Wait for the indexer to finish backfilling — there is no tool endpoint exposing indexer state yet; check process logs for indexer activity. If the indexer never started, ensure `PHAROS_CONTRACT_ADDRESS` is set and the contract is accessible.
 
 ### `MCP_SAFE_MODE=true` blocks `karma_health` and all economy tools
 
@@ -1464,3 +1478,5 @@ Recommended next work:
 - The `SkillEventIndexer` currently uses `fromBlock=0n` on restart (full backfill). Add a persisted `lastIndexedBlock` checkpoint to reduce startup time as the chain grows.
 - `fund_beta.ts` contains a hardcoded password (`KarmaTestPassword2026!`) — do not commit to production; use `KEYSTORE_PASSWORD` env var.
 - Add `AwsKmsKeyRegistry` unit tests with LocalStack.
+- Update `src/core/pattern_debt.ts` DEBT-002 entry: the V4 KMS implementation shipped (`src/storage/providers/`), so the `currentControl`, `limitation`, and `status` fields are stale. Update to `status: "implemented"`, `urgency: "resolved"` to match reality.
+- Wire `SkillEventIndexer.health()` into a tool endpoint (e.g., extend `karma_health`) so operators can observe `lastIndexedBlock`, `lastEventAt`, and `watching` state without inspecting logs.
