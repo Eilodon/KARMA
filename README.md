@@ -17,7 +17,7 @@ The system has three layers:
 > Production storage requirement: Redis
 > Production HTTP auth requirement: JWT or OIDC JWKS, not API key
 
-KARMA intentionally does **not** claim to provide a true security sandbox for untrusted plugins or a completed crypto-erasure runtime. Those are tracked as release-blocking epics until implemented with real container/microVM/WASM and KMS-backed primitives.
+KARMA intentionally does **not** claim to provide a true security sandbox for untrusted plugins — that remains a release-blocking epic (DEBT-001) until implemented with a real container/microVM/WASM runner. KMS-backed crypto-erasure (`smcp:v4:kms`) **shipped 2026-06-14** across Vault / AWS-KMS / GCP-KMS providers (DEBT-002 resolved); the only residual is AWS KMS's mandatory 7-day pending-deletion window.
 
 ---
 
@@ -93,7 +93,7 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 - Reputation: BASE=50, MAX=100, STEP=5 (matches Foundry tests).
 - ABI drift-guarded: `src/__tests__/karma_contract.test.ts` re-reads the Foundry artifact and fails if the Solidity surface diverges from `src/lib/abi.ts`.
 
-Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried live by `super_mcp_pattern_debt`) and `docs/superpowers/pattern-debt.md` (KARMA app layer).
+Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried live by `karma_pattern_debt`) and `docs/superpowers/pattern-debt.md` (KARMA app layer).
 
 ---
 
@@ -112,7 +112,7 @@ Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried 
 - OAuth Resource Server metadata and resource-indicator enforcement.
 - Rate limiting, quota, idempotency, tenant execution locks, JSON Schema 2020-12 validation, timeout handling, output firewall, and telemetry.
 - Plugin governance with allowlists, SHA-256 hash pinning, manifest pinning, safe mode, capability declarations, and external plugin runner.
-- Runtime pattern-debt reporting through `super_mcp_pattern_debt`.
+- Runtime pattern-debt reporting through `karma_pattern_debt`.
 - File/stdout/stderr JSONL telemetry and optional OpenTelemetry OTLP export.
 
 ### Layer 1 — KARMA skill economy tools
@@ -203,7 +203,6 @@ Storage / telemetry
 ├── tsconfig.json
 ├── foundry.toml                     ← Foundry for contract tests
 ├── src/
-│   ├── check_gas.ts                 ← gas utility (untracked dev script)
 │   ├── index.ts
 │   ├── config/env.ts
 │   ├── core/
@@ -214,6 +213,7 @@ Storage / telemetry
 │   │   ├── plugin_worker.ts
 │   │   ├── registrar.ts
 │   │   ├── runtime.ts
+│   │   ├── runtime_identity.ts      ← fail-closed trusted-runtime marker (karma.tool canary)
 │   │   ├── task_store.ts
 │   │   └── task_tracker.ts
 │   ├── http/
@@ -247,9 +247,10 @@ Storage / telemetry
 │   │   ├── karma.tool.ts            ← KARMA skill economy (8 tools, trusted built-in)
 │   │   └── system.tool.ts           ← ping + pattern_debt + test_long_task
 │   ├── scripts/
+│   │   ├── _demo_format.ts          ← zero-dep ANSI presentation helpers for the demos
 │   │   ├── check_connectivity.ts    ← verify Pharos Atlantic chainId/gasMode
 │   │   ├── deploy_contract.ts       ← deploy AgentSkillRegistry (keystore-signed)
-│   │   ├── fund_beta.ts             ← transfer PHRS alpha→beta (dev utility)
+│   │   ├── discover_demo.ts         ← offline BM25 discovery showcase (ranking + injection-strip)
 │   │   ├── migrate_encryption.ts    ← re-encrypt pre-V4 blobs
 │   │   ├── run_demo.ts              ← 5-tx self-referential KARMA loop
 │   │   ├── setup_keystore.ts        ← generate multi-agent Web3 v3 keystore
@@ -313,7 +314,7 @@ Important implementation files:
 | `src/lib/serialize.ts` | `jsonSafe()` — recursive BigInt → decimal string (D-6). |
 | `src/lib/types.ts` | `AgentIdentity`, `CryptoV3`, `KeystoreFileV3`, `SkillDocument`. |
 | `src/plugins/karma.tool.ts` | 8 KARMA tools; trusted in-process built-in; `assertInProcess()` fail-fast. |
-| `src/plugins/system.tool.ts` | Built-in: `super_mcp_ping`, `super_mcp_pattern_debt`, `super_mcp_test_long_task`. |
+| `src/plugins/system.tool.ts` | Built-in: `karma_ping`, `karma_pattern_debt`, `karma_test_long_task`. |
 | `src/mcp/adapter/execution_pipeline.ts` | Tool call governance, native task execution, state save, telemetry. |
 | `src/core/task_store.ts` | Durable task store with local/memory/Redis and atomic input consume. |
 | `src/storage/encryption.ts` | Encryption-at-rest: `smcp:v4:kms`, `smcp:v3:hkdf-tenant`, `smcp:v2:scrypt`. |
@@ -546,30 +547,41 @@ vitest run src/__tests__/karma_contract.test.ts  # ABI structural drift check
 
 ## Running the demo
 
-`DEMO.md` documents a completed 5-transaction self-referential loop on Pharos Atlantic. To reproduce:
+`DEMO.md` documents a completed 5-transaction self-referential loop on Pharos Atlantic.
+
+### Layer-2 discovery showcase (offline — no chain, no keystore)
 
 ```bash
-# 1. Fund agent-alpha from faucet, then transfer a little to agent-beta:
-KEYSTORE_PASSWORD=<password> pnpm exec tsx src/scripts/fund_beta.ts
+pnpm demo:discover
+```
 
+Runs instantly against an in-memory BM25 index: relevance × on-chain-reputation ranking,
+BigInt-safe price/reputation filters, and prompt-injection sanitization (hidden bidi / zero-width /
+control code points stripped before any agent reads the skill). Lead with this — it needs no setup.
+
+### Full economic loop (on-chain)
+
+```bash
+# 1. Fund agent-alpha (+ a little agent-beta) from a Pharos faucet (see addresses from setup:keystore).
 # 2. Deploy the contract (if not already done):
 KEYSTORE_PASSWORD=<password> pnpm exec tsx src/scripts/deploy_contract.ts
 
-# 3. Set the contract address, then run the demo:
-PHAROS_CONTRACT_ADDRESS=0x<address> KEYSTORE_PASSWORD=<password> \
-  pnpm exec tsx src/scripts/run_demo.ts
-
-# 4. Verify the final on-chain state (read-only):
-PHAROS_CONTRACT_ADDRESS=0x<address> KEYSTORE_PASSWORD=<password> \
-  pnpm exec tsx src/scripts/verify_demo.ts
+# 3. Set PHAROS_CONTRACT_ADDRESS in .env, then run the demo and verify:
+PHAROS_CONTRACT_ADDRESS=0x<address> KEYSTORE_PASSWORD=<password> pnpm demo
+PHAROS_CONTRACT_ADDRESS=0x<address> KEYSTORE_PASSWORD=<password> pnpm demo:verify
 ```
+
+Demo knobs: `PHAROS_POLL_INTERVAL_MS=300` tightens viem's 4000ms receipt poll (the real driver of
+perceived confirm latency); `DEMO_JSON=1` emits a machine-readable summary line; `NO_COLOR=1`
+disables ANSI color.
 
 The demo loop:
 1. Alpha registers `discover_skills` as a paid skill (0.0001 PHRS).
-2. Beta escrows a job (`create_job` with idempotency nonce).
+2. Beta escrows a job (`create_job` with idempotency nonce), then **replays the identical request
+   to prove exactly-once** — the second call returns the existing job and escrows nothing.
 3. Alpha delivers a result hash.
 4. Beta confirms completion (escrow credited to Alpha, reputation 50→55).
-5. Alpha withdraws the payout.
+5. Alpha withdraws the payout. A Layer-0 hardening summary closes the run.
 
 Each step calls the real tool handler (`karma.tool.ts`) → `realKarmaService` → Pharos Atlantic on-chain.
 
@@ -683,13 +695,13 @@ curl -sS http://127.0.0.1:3333/mcp \
   -H 'Content-Type: application/json' \
   -H 'x-api-key: change-this-to-a-random-string-with-at-least-32-chars' \
   -H 'Mcp-Method: tools/call' \
-  -H 'Mcp-Name: super_mcp_ping' \
+  -H 'Mcp-Name: karma_ping' \
   --data '{
     "jsonrpc": "2.0",
     "id": "2",
     "method": "tools/call",
     "params": {
-      "name": "super_mcp_ping",
+      "name": "karma_ping",
       "arguments": {"message": "hello"}
     }
   }'
@@ -969,7 +981,7 @@ Plugin files live in `src/plugins/`. Accepted filenames: `*.tool.ts` and `*.tool
 
 | Plugin | Notes |
 | --- | --- |
-| `system.tool.ts` | Always loaded. Provides `super_mcp_ping`, `super_mcp_pattern_debt`, and `super_mcp_test_long_task` (dev only). |
+| `system.tool.ts` | Always loaded. Provides `karma_ping`, `karma_pattern_debt`, and `karma_test_long_task` (dev only). |
 | `karma.tool.ts` | KARMA skill economy. **Must** be trusted built-in (`MCP_PLUGIN_ISOLATION_MODE=policy`). Requires `MCP_SAFE_MODE=false`. |
 
 ### `karma.tool.ts` isolation requirement
@@ -1117,7 +1129,7 @@ All Layer 0 configuration is read in `src/config/env.ts`. KARMA app-layer env va
 | `HTTP_HOST` | `127.0.0.1` | HTTP bind host. |
 | `HTTP_PORT` | `3333` | HTTP bind port. |
 | `MCP_PROTOCOL_MODE` | `rc2026` | Only supported value. |
-| `MCP_PROJECT_ID` | `super_mcp_default` | Namespace for Redis/vault keys. |
+| `MCP_PROJECT_ID` | `karma_default` | Namespace for Redis/vault keys. |
 | `MCP_TENANT_ID` | `tenant_local` | Local/stdio fallback tenant. |
 | `MCP_SAFE_MODE` | `true` | Blocks `network` capability tools (including all KARMA tools). Set `false` to enable app layer. |
 | `MCP_TOOL_TIMEOUT_MS` | `300000` | Per-tool timeout. |
@@ -1248,6 +1260,9 @@ Current package scripts:
   "migrate:encryption": "tsx src/scripts/migrate_encryption.ts",
   "check:connectivity": "tsx src/scripts/check_connectivity.ts",
   "setup:keystore": "tsx src/scripts/setup_keystore.ts",
+  "demo": "tsx src/scripts/run_demo.ts",
+  "demo:discover": "tsx src/scripts/discover_demo.ts",
+  "demo:verify": "tsx src/scripts/verify_demo.ts",
   "test:contract": "forge test",
   "test:enterprise": "vitest run src/__tests__/task_runtime.test.ts ... (see package.json)"
 }
@@ -1305,6 +1320,8 @@ Additional suites (run via `pnpm test` or individually):
 - `local_key_registry.test.ts`, `vault_key_registry.test.ts`, `gcp_kms_key_registry.test.ts` — KMS providers.
 - `holyseed_patterns.test.ts` — Sensitive-pattern detection.
 - `registrar_governance.test.ts` — Plugin/tool registration governance.
+- `runtime_identity.test.ts` — fail-closed trusted-runtime marker for the `karma.tool` canary.
+- `demo_format.test.ts` — zero-dep demo presentation helpers (`paint` / `short` / `reveal`).
 - `sanitize.test.ts`, `otel.test.ts`, `file_logger.test.ts`, `tool_metadata.test.ts` — Supporting subsystems.
 
 ---
@@ -1313,20 +1330,20 @@ Additional suites (run via `pnpm test` or individually):
 
 KARMA keeps residual security/design debt visible instead of hiding it.
 
-Runtime report tool: `super_mcp_pattern_debt` (reads from `src/core/pattern_debt.ts` at runtime).
+Runtime report tool: `karma_pattern_debt` (reads from `src/core/pattern_debt.ts` at runtime).
 
 Debt registries:
-- `src/core/pattern_debt.ts` — Layer 0 runtime items DEBT-001 to DEBT-006, queried live by `super_mcp_pattern_debt`.
+- `src/core/pattern_debt.ts` — Layer 0 runtime items DEBT-001 to DEBT-006, queried live by `karma_pattern_debt`.
 - `docs/superpowers/pattern-debt.md` — KARMA app-layer items PD-001 to PD-003, tracked separately.
 
 ### Layer 0 debt (DEBT-001 to DEBT-006)
 
-Authoritative source: `src/core/pattern_debt.ts`. The table below reflects the **codebase state** as of 2026-06-16; note that `pattern_debt.ts` DEBT-002 entry is stale (the V4 KMS implementation ships in `src/storage/providers/` but the registry text hasn't been updated).
+Authoritative source: `src/core/pattern_debt.ts`. The table below reflects the **codebase state** as of 2026-06-16.
 
 | Debt | Status | Current truth |
 | --- | --- | --- |
 | `DEBT-001-plugin-os-isolation` | **Open, release-blocking** | Current runner is child-process best-effort only. No container, Wasmtime, or microVM boundary. Production non-built-in plugin config fails closed unless explicitly waived. |
-| `DEBT-002-crypto-erasure` | **Implemented** (registry stale) | `smcp:v4:kms` envelope and four KMS providers (`Local`, `Vault`, `AWS KMS`, `GCP KMS`) shipped 2026-06-14. `MCP_REQUIRE_CRYPTO_ERASURE=true` requires real KMS provider. `src/core/pattern_debt.ts` still shows this as open — the registry text predates V4. |
+| `DEBT-002-crypto-erasure` | **Implemented / resolved** | `smcp:v4:kms` envelope and four KMS providers (`Local`, `Vault`, `AWS KMS`, `GCP KMS`) shipped 2026-06-14; `src/core/pattern_debt.ts` reconciled to `implemented`. `MCP_REQUIRE_CRYPTO_ERASURE=true` requires a real KMS provider. Residual: AWS KMS 7-day pending-deletion window. |
 | `DEBT-003-native-mcp-tasks` | **Monitoring** | Custom Tasks adapter remains isolated until the TypeScript SDK exposes stable public Tasks APIs. |
 | `DEBT-004-oauth-resource-indicator` | **Implemented** | JWT/OIDC resource indicator enforced when configured; production requires resource URI. |
 | `DEBT-005-output-firewall-coverage` | **Partially resolved** | Structured redaction implemented with deterministic patterns and limits. No DLP/classifier backend. |
@@ -1472,11 +1489,8 @@ See `LICENSE` in the repository.
 Recommended next work:
 
 - Implement a true container/Wasmtime/microVM plugin runner before supporting untrusted third-party plugins in production (`DEBT-001`, release-blocking).
-- Add `AwsKmsKeyRegistry` unit tests — requires a live AWS KMS endpoint or LocalStack mock.
+- Add `AwsKmsKeyRegistry` unit tests — requires a live AWS KMS endpoint or a LocalStack mock.
 - Run `pnpm migrate:encryption` once per tenant after enabling `KMS_PROVIDER` to re-encrypt all pre-V4 blobs before offering a formal erasure SLA.
 - Keep monitoring MCP TypeScript SDK public Tasks support before replacing the local adapter (`DEBT-003`, monitoring).
 - The `SkillEventIndexer` currently uses `fromBlock=0n` on restart (full backfill). Add a persisted `lastIndexedBlock` checkpoint to reduce startup time as the chain grows.
-- `fund_beta.ts` contains a hardcoded password (`KarmaTestPassword2026!`) — do not commit to production; use `KEYSTORE_PASSWORD` env var.
-- Add `AwsKmsKeyRegistry` unit tests with LocalStack.
-- Update `src/core/pattern_debt.ts` DEBT-002 entry: the V4 KMS implementation shipped (`src/storage/providers/`), so the `currentControl`, `limitation`, and `status` fields are stale. Update to `status: "implemented"`, `urgency: "resolved"` to match reality.
 - Wire `SkillEventIndexer.health()` into a tool endpoint (e.g., extend `karma_health`) so operators can observe `lastIndexedBlock`, `lastEventAt`, and `watching` state without inspecting logs.
