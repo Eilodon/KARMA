@@ -75,6 +75,9 @@ export interface SkillSearchOptions {
 
 export class BM25SkillIndex {
   private readonly ms: MiniSearch<SkillDocument>;
+  // MiniSearch can't enumerate by a stored field, so we keep a parallel id→doc map to answer
+  // getByOwner() without an RPC. Kept in lockstep with the index in upsert()/discard().
+  private readonly byId = new Map<number, SkillDocument>();
 
   constructor() {
     this.ms = new MiniSearch<SkillDocument>({
@@ -90,11 +93,26 @@ export class BM25SkillIndex {
     const clean = sanitizeDoc(doc);
     if (this.ms.has(clean.id)) this.ms.replace(clean);
     else this.ms.add(clean);
+    this.byId.set(clean.id, clean);
   }
 
   /** Remove a skill from results (e.g. on SkillDeactivated). */
   discard(skillId: number): void {
     if (this.ms.has(skillId)) this.ms.discard(skillId);
+    this.byId.delete(skillId);
+  }
+
+  /**
+   * First indexed skill document owned by `ownerAddress` (case-insensitive), or null.
+   * Used by query_social_graph format:"full" to source a reputation_score with no extra RPC.
+   * Returns null when the agent has registered no skill — callers fall back to BASE (50).
+   */
+  getByOwner(ownerAddress: string): SkillDocument | null {
+    const target = ownerAddress.toLowerCase();
+    for (const doc of this.byId.values()) {
+      if (doc.owner_address.toLowerCase() === target) return doc;
+    }
+    return null;
   }
 
   size(): number {

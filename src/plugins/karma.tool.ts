@@ -4,6 +4,8 @@ import type { ToolDefinition, ToolResult } from "../mcp/adapter/tool_registry.js
 import { jsonSafe } from "../lib/serialize.js";
 import { realKarmaService, type KarmaService } from "../lib/karma_service.js";
 import { isTrustedRuntime } from "../core/runtime_identity.js";
+import { getKarmaIndexerHealth } from "../lib/skill_indexer_runtime.js";
+import type { JobDetail, JobStatus, SocialGraphFullResult } from "../lib/types.js";
 
 /**
  * KARMA Skill-Economy plugin (Layer 1).
@@ -55,9 +57,13 @@ const karmaHealth: ToolDefinition = {
     const ping = (args as { ping?: string }).ping;
     const hasRpcEnv = Boolean(process.env.PHAROS_RPC_URL);
     const hasContractEnv = Boolean(process.env.PHAROS_CONTRACT_ADDRESS);
+    const indexer = getKarmaIndexerHealth();
+    const indexerSummary =
+      "watching" in indexer ? `watching=${indexer.watching} block=${indexer.lastIndexedBlock}` : "started=false";
     return reply(
-      `[KARMA] health: in-process=true rpcEnv=${hasRpcEnv} contractEnv=${hasContractEnv}` + (ping ? ` ping=${ping}` : ""),
-      { inProcess: true, hasRpcEnv, hasContractEnv },
+      `[KARMA] health: in-process=true rpcEnv=${hasRpcEnv} contractEnv=${hasContractEnv} indexer[${indexerSummary}]` +
+        (ping ? ` ping=${ping}` : ""),
+      { inProcess: true, hasRpcEnv, hasContractEnv, indexer },
     );
   },
 };
@@ -67,6 +73,77 @@ function resolveAddress(svc: KarmaService, a: { agentId?: string; address?: stri
   if (a.agentId) return svc.addressOf(a.agentId);
   if (a.address) return a.address as Address;
   throw new Error("[KARMA] provide either agentId or address");
+}
+
+/** JobStatus enum order from AgentSkillRegistry.sol (index 4 = Disputed). */
+const STATUS_MAP: readonly JobStatus[] = ["Open", "Delivered", "Completed", "Refunded", "Disputed"];
+const ZERO_HASH = `0x${"0".repeat(64)}`;
+const WEI_PER_PHRS = 10n ** 18n;
+
+/** Format wei → PHRS with exactly 6 decimals using integer math (no float precision loss). */
+function weiToPhrs6(wei: bigint): string {
+  const neg = wei < 0n;
+  const w = neg ? -wei : wei;
+  const whole = w / WEI_PER_PHRS;
+  const frac6 = (w % WEI_PER_PHRS) / 10n ** 12n; // keep 6 of the 18 fractional digits
+  return `${neg ? "-" : ""}${whole}.${frac6.toString().padStart(6, "0")}`;
+}
+
+/**
+ * query_social_graph format:"full" — hydrate each job edge into a JobDetail + a summary block.
+ * RPC cost: getProviderJobs + getRequesterJobs (1 batched round-trip) + N×jobs() (1 batched
+ * round-trip, batchSize 100) = 2 round-trips for N ≤ 100. Reputation comes from the in-process
+ * BM25 index (0 RPC). Reuses svc.readJob so the jobs() tuple is decoded in one place.
+ */
+async function handleFullFormat(address: Address, svc: KarmaService): Promise<SocialGraphFullResult> {
+  const [providerIds, requesterIds] = await Promise.all([
+    svc.getProviderJobs(address),
+    svc.getRequesterJobs(address),
+  ]);
+
+  const uniqueIds = [...new Set([...providerIds, ...requesterIds].map(String))];
+  const jobs = await Promise.all(uniqueIds.map((id) => svc.readJob(BigInt(id))));
+  const jobById = new Map(uniqueIds.map((id, i) => [id, jobs[i]] as const));
+
+  const toDetail = (id: bigint, counterpart: "requester" | "provider"): JobDetail => {
+    const j = jobById.get(String(id));
+    if (!j) throw new Error(`[KARMA] job #${id} missing from hydration batch`);
+    return {
+      job_id: String(id),
+      counterpart: counterpart === "requester" ? j.requester : j.provider,
+      skill_id: String(j.skillId),
+      escrow_amount_phrs: weiToPhrs6(j.escrowAmount),
+      escrow_amount_wei: String(j.escrowAmount),
+      status: STATUS_MAP[j.status] ?? "Open",
+      result_hash: j.resultHash.toLowerCase() === ZERO_HASH ? null : j.resultHash,
+      created_at: Number(j.createdAt),
+    };
+  };
+
+  const asProvider = providerIds.map((id) => toDetail(id, "requester"));
+  const asRequester = requesterIds.map((id) => toDetail(id, "provider"));
+
+  const totalEarnedWei = asProvider
+    .filter((j) => j.status === "Completed")
+    .reduce((sum, j) => sum + BigInt(j.escrow_amount_wei), 0n);
+  const totalSpentWei = asRequester.reduce((sum, j) => sum + BigInt(j.escrow_amount_wei), 0n);
+  const uniquePartners = new Set(
+    [...asProvider, ...asRequester].map((j) => j.counterpart.toLowerCase()),
+  ).size;
+
+  return {
+    focal_agent: address,
+    as_provider: asProvider,
+    as_requester: asRequester,
+    summary: {
+      total_jobs_provided: asProvider.length,
+      total_jobs_requested: asRequester.length,
+      total_earned_phrs: weiToPhrs6(totalEarnedWei),
+      total_spent_phrs: weiToPhrs6(totalSpentWei),
+      unique_partners: uniquePartners,
+      reputation_score: svc.getByOwner(address)?.reputation_score ?? 50,
+    },
+  };
 }
 
 export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
@@ -292,16 +369,39 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
 
   const querySocialGraph: ToolDefinition = {
     name: "query_social_graph",
-    description: "Return the job edges for an agent: jobs it provided and jobs it requested.",
-    inputSchema: { agentId: z.string().optional(), address: z.string().optional() },
+    description:
+      "Return the job edges for an agent: jobs it provided and jobs it requested. " +
+      'format="ids" (default) returns raw job-id arrays — fast, backward-compatible. ' +
+      'format="full" hydrates each job into a detail object (amounts, status, timestamps) plus ' +
+      "a summary block — use for visualization and reporting.",
+    inputSchema: {
+      agentId: z.string().optional(),
+      address: z.string().optional(),
+      format: z.enum(["ids", "full"]).default("ids")
+        .describe('"ids" → raw job-id arrays (default). "full" → hydrated job details + summary.'),
+    },
     capabilities: ["network"],
     allowedPhases: [...PHASES],
     annotations: readAnnotations,
     execution: { taskSupport: "forbidden" },
     handler: async (args) => {
       assertInProcess();
-      const a = z.object({ agentId: z.string().optional(), address: z.string().optional() }).parse(args);
+      const a = z.object({
+        agentId: z.string().optional(),
+        address: z.string().optional(),
+        format: z.enum(["ids", "full"]).default("ids"),
+      }).parse(args);
       const address = resolveAddress(svc, a);
+
+      if (a.format === "full") {
+        const result = await handleFullFormat(address, svc);
+        return reply(
+          `[KARMA] social graph (full) for ${address}: provided ${result.summary.total_jobs_provided}, ` +
+            `requested ${result.summary.total_jobs_requested}, reputation ${result.summary.reputation_score}`,
+          result as unknown as Record<string, unknown>,
+        );
+      }
+
       const [asProvider, asRequester] = await Promise.all([
         svc.getProviderJobs(address),
         svc.getRequesterJobs(address),
@@ -313,6 +413,59 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     },
   };
 
+  const getPendingBalance: ToolDefinition = {
+    name: "get_pending_balance",
+    description:
+      "Read an agent's withdrawable balance — escrow released by complete_job that is awaiting " +
+      "pull-payment. Read-only; accepts an agentId or a raw address.",
+    inputSchema: { agentId: z.string().optional(), address: z.string().optional() },
+    capabilities: ["network"],
+    allowedPhases: [...PHASES],
+    annotations: readAnnotations,
+    execution: { taskSupport: "forbidden" },
+    handler: async (args) => {
+      assertInProcess();
+      const a = z.object({ agentId: z.string().optional(), address: z.string().optional() }).parse(args);
+      const address = resolveAddress(svc, a);
+      const wei = await svc.getPendingWithdrawal(address);
+      return reply(`[KARMA] pending balance for ${address}: ${weiToPhrs6(wei)} PHRS`, {
+        address,
+        withdrawableWei: wei,
+        formattedPHRS: weiToPhrs6(wei),
+      });
+    },
+  };
+
+  const withdrawBalance: ToolDefinition = {
+    name: "withdraw_balance",
+    description:
+      "Withdraw an agent's full released-escrow balance to its wallet (pull-payment). Closes the " +
+      "economic loop after complete_job. Reverts on-chain if there is nothing to withdraw.",
+    inputSchema: {
+      agentId: z.string().describe("Keystore agent id that owns the balance and signs the withdrawal."),
+    },
+    capabilities: ["network"],
+    allowedPhases: [...PHASES],
+    annotations: writeAnnotations,
+    execution: { taskSupport: "forbidden" },
+    handler: async (args) => {
+      assertInProcess();
+      const a = z.object({ agentId: z.string() }).parse(args);
+      const { amount, outcome } = await svc.withdraw(svc.account(a.agentId));
+      if (outcome.status === "pending" || amount == null) {
+        return reply(`[KARMA] withdraw_balance broadcast; receipt pending tx=${outcome.hash}`, {
+          status: "pending",
+          txHash: outcome.hash,
+        });
+      }
+      return reply(`[KARMA] withdraw_balance confirmed tx=${outcome.hash}`, {
+        status: "confirmed",
+        txHash: outcome.hash,
+        amountWei: amount,
+      });
+    },
+  };
+
   return [
     registerSkill,
     discoverSkills,
@@ -321,6 +474,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     completeJob,
     getAgentReputation,
     querySocialGraph,
+    getPendingBalance,
+    withdrawBalance,
   ];
 }
 

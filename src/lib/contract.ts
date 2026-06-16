@@ -297,7 +297,7 @@ export class SkillEventIndexer {
 }
 
 /** Map a raw viem contract-event log to the indexed shape (null = event we don't track). */
-function mapLog(raw: unknown): IndexedEvent | null {
+export function mapLog(raw: unknown): IndexedEvent | null {
   const log = raw as { eventName?: string; args?: Record<string, unknown>; blockNumber?: bigint | null };
   const bn = log.blockNumber;
   const a = log.args;
@@ -322,31 +322,54 @@ function mapLog(raw: unknown): IndexedEvent | null {
   }
 }
 
-/** Production wiring of the indexer over the real Pharos clients; starts immediately. */
-export function startSkillIndexer(onEvent: (e: IndexedEvent) => void, fromBlock = 0n): SkillEventIndexer {
-  const publicClient = getPublicClient();
-  const address = getContractAddress();
-  const toEvents = (logs: unknown[]): IndexedEvent[] =>
-    logs.map(mapLog).filter((e): e is IndexedEvent => e !== null);
-  const deps: IndexerDeps = {
-    getBlockNumber: () => publicClient.getBlockNumber(),
+/** Map+filter a batch of raw viem logs to tracked IndexedEvents (drops untracked/pending logs). */
+export function toIndexedEvents(logs: unknown[]): IndexedEvent[] {
+  return logs.map(mapLog).filter((e): e is IndexedEvent => e !== null);
+}
+
+/**
+ * The narrow subset of a viem public client the indexer wiring depends on. Declaring it
+ * structurally is what makes buildViemIndexerDeps unit-testable with a fake client instead of
+ * a live chain (closes the indexer half of PD-002).
+ */
+export interface IndexerEventClient {
+  getBlockNumber(): Promise<bigint>;
+  getContractEvents(args: {
+    address: `0x${string}`;
+    abi: typeof agentSkillRegistryAbi;
+    fromBlock: bigint;
+    toBlock: bigint;
+  }): Promise<unknown[]>;
+  watchContractEvent(args: {
+    address: `0x${string}`;
+    abi: typeof agentSkillRegistryAbi;
+    onLogs: (logs: unknown[]) => void;
+    onError: (err: unknown) => void;
+  }): () => void;
+}
+
+/** Build the viem-backed IndexerDeps for a client + contract address. Pure wiring — unit-testable. */
+export function buildViemIndexerDeps(client: IndexerEventClient, address: `0x${string}`): IndexerDeps {
+  return {
+    getBlockNumber: () => client.getBlockNumber(),
     getLogs: async (from, to) =>
-      toEvents(
-        await publicClient.getContractEvents({
-          address,
-          abi: agentSkillRegistryAbi,
-          fromBlock: from,
-          toBlock: to,
-        }),
+      toIndexedEvents(
+        await client.getContractEvents({ address, abi: agentSkillRegistryAbi, fromBlock: from, toBlock: to }),
       ),
     watch: ({ onLogs, onError }) =>
-      publicClient.watchContractEvent({
+      client.watchContractEvent({
         address,
         abi: agentSkillRegistryAbi,
-        onLogs: (logs) => onLogs(toEvents(logs as unknown[])),
+        onLogs: (logs) => onLogs(toIndexedEvents(logs)),
         onError,
       }),
   };
+}
+
+/** Production wiring of the indexer over the real Pharos clients; starts immediately. */
+export function startSkillIndexer(onEvent: (e: IndexedEvent) => void, fromBlock = 0n): SkillEventIndexer {
+  // The viem PublicClient satisfies IndexerEventClient structurally — no cast needed.
+  const deps = buildViemIndexerDeps(getPublicClient(), getContractAddress());
   const indexer = new SkillEventIndexer(deps, onEvent, fromBlock);
   void indexer.start();
   return indexer;

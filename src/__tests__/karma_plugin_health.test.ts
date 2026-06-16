@@ -30,6 +30,14 @@ describe("karma.tool.ts skeleton (in-process built-in)", () => {
     expect(res.structuredContent).toMatchObject({ inProcess: true, hasRpcEnv: true });
   });
 
+  it("surfaces indexer state (started=false until the indexer is wired by index.ts)", async () => {
+    markTrustedRuntime();
+    const t = getHealth();
+    const res = await t.handler({}, {} as never, undefined, undefined);
+    expect(res.structuredContent).toMatchObject({ indexer: { started: false } });
+    expect(res.content[0].text).toMatch(/indexer\[started=false\]/);
+  });
+
   it("fail-closed: throws when the trusted-runtime marker is absent, even with no worker env var", async () => {
     delete process.env.KARMA_PLUGIN_WORKER;
     const t = getHealth();

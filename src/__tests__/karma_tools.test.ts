@@ -29,7 +29,11 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
     addressOf: vi.fn(() => ALPHA),
     registerSkill: vi.fn(async () => ({ skillId: 7n, outcome: confirmed })),
     readSkill: vi.fn(async () => skill()),
-    readJob: vi.fn(async () => ({ provider: ALPHA }) as never),
+    readJob: vi.fn(async () => ({
+      requester: ALPHA, provider: ALPHA, skillId: 1n, taskHash: `0x${"00".repeat(32)}`,
+      escrowAmount: 0n, deadline: 0n, status: 0, resultHash: `0x${"00".repeat(32)}`,
+      createdAt: 1750145678n, completedAt: 0n,
+    }) as never),
     deriveTaskHash: vi.fn(() => `0x${"de".repeat(32)}` as `0x${string}`),
     findExistingJob: vi.fn(async () => null),
     createJob: vi.fn(async () => ({ jobId: 4n, outcome: confirmed })),
@@ -38,7 +42,11 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
     getAgentSkills: vi.fn(async () => [7n]),
     getProviderJobs: vi.fn(async () => [4n, 9n]),
     getRequesterJobs: vi.fn(async () => [2n]),
+    getPendingWithdrawal: vi.fn(async () => 100_000_000_000_000n),
+    withdraw: vi.fn(async () => ({ amount: 100_000_000_000_000n, outcome: confirmed })),
     indexUpsert: vi.fn(),
+    indexDiscard: vi.fn(),
+    getByOwner: vi.fn(() => null),
     search: vi.fn(() => [
       {
         skill_id: 7,
@@ -76,7 +84,7 @@ describe("P6 KARMA tools", () => {
     tools = createKarmaTools(svc);
   });
 
-  it("exposes the 7 economy tools, all network-capable with no required scopes (D-2)", () => {
+  it("exposes the 9 economy tools, all network-capable with no required scopes (D-2)", () => {
     const names = tools.map((t) => t.name);
     for (const n of [
       "register_skill",
@@ -86,6 +94,8 @@ describe("P6 KARMA tools", () => {
       "complete_job",
       "get_agent_reputation",
       "query_social_graph",
+      "get_pending_balance",
+      "withdraw_balance",
     ]) {
       expect(names).toContain(n);
       const t = tool(tools, n);
@@ -180,5 +190,95 @@ describe("P6 KARMA tools", () => {
     const res = await call(tool(tools, "query_social_graph"), { address: ALPHA });
     expect(res.structuredContent).toMatchObject({ asProvider: ["4", "9"], asRequester: ["2"] });
     expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it('query_social_graph format:"full": hydrates JobDetail edges + summary, no bigint', async () => {
+    const BETA = "0xB2c3d4E5f6a7b8C9d0e1F2a3b4C5d6E7f8a9B0c1" as const;
+    const GAMMA = "0xC3d4e5F6a7b8c9D0e1f2A3b4c5D6e7f8A9b0C1d2" as const;
+    const completedHash = `0x${"ab".repeat(32)}` as `0x${string}`;
+    const job = (over: Record<string, unknown>) => ({
+      requester: ALPHA, provider: ALPHA, skillId: 1n, taskHash: `0x${"00".repeat(32)}`,
+      escrowAmount: 0n, deadline: 0n, status: 0, resultHash: `0x${"00".repeat(32)}`,
+      createdAt: 1750145678n, completedAt: 0n, ...over,
+    });
+    svc = fakeService({
+      // ALPHA provided jobs 4 & 9 (counterpart = requester), requested job 2 (counterpart = provider)
+      getProviderJobs: vi.fn(async () => [4n, 9n]),
+      getRequesterJobs: vi.fn(async () => [2n]),
+      readJob: vi.fn(async (id: bigint) => {
+        if (id === 4n) return job({ requester: BETA, escrowAmount: 100_000_000_000_000n, status: 2, resultHash: completedHash }) as never;
+        if (id === 9n) return job({ requester: BETA, escrowAmount: 50_000_000_000_000n, status: 0 }) as never;
+        return job({ provider: GAMMA, escrowAmount: 30_000_000_000_000n, status: 0 }) as never; // job 2
+      }),
+      getByOwner: vi.fn(() => ({
+        id: 1, skill_id: 1, name: "x", description: "", mcp_endpoint: "",
+        price_per_call_wei: "1", reputation_score: 55, owner_address: ALPHA, active: true,
+      })),
+    });
+    tools = createKarmaTools(svc);
+
+    const res = await call(tool(tools, "query_social_graph"), { address: ALPHA, format: "full" });
+    const sc = res.structuredContent as {
+      focal_agent: string;
+      as_provider: Array<{ job_id: string; counterpart: string; status: string; escrow_amount_phrs: string; result_hash: string | null }>;
+      as_requester: Array<{ counterpart: string; status: string }>;
+      summary: { total_jobs_provided: number; total_jobs_requested: number; total_earned_phrs: string; total_spent_phrs: string; unique_partners: number; reputation_score: number };
+    };
+
+    expect(sc.focal_agent).toBe(ALPHA);
+    // provider edge job 4: completed, counterpart = requester (BETA), escrow 1e14 wei = 0.000100 PHRS
+    const j4 = sc.as_provider.find((j) => j.job_id === "4");
+    expect(j4?.status).toBe("Completed");
+    expect(j4?.counterpart).toBe(BETA);
+    expect(j4?.escrow_amount_phrs).toMatch(/^\d+\.\d{6}$/);
+    expect(j4?.escrow_amount_phrs).toBe("0.000100");
+    expect(j4?.result_hash).toBe(completedHash);
+    // open job 9 has the all-zero result hash → null
+    expect(sc.as_provider.find((j) => j.job_id === "9")?.result_hash).toBeNull();
+    // requester edge job 2: counterpart = provider (GAMMA)
+    expect(sc.as_requester[0].counterpart).toBe(GAMMA);
+    // summary: only completed provider job 4 counts toward earnings; all requester jobs toward spend
+    expect(sc.summary.total_jobs_provided).toBe(2);
+    expect(sc.summary.total_jobs_requested).toBe(1);
+    expect(sc.summary.total_earned_phrs).toBe("0.000100");
+    expect(sc.summary.total_spent_phrs).toBe("0.000030");
+    expect(sc.summary.unique_partners).toBe(2); // BETA + GAMMA
+    expect(sc.summary.reputation_score).toBe(55);
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it('query_social_graph format:"full": reputation falls back to 50 when owner has no indexed skill', async () => {
+    const res = await call(tool(tools, "query_social_graph"), { address: ALPHA, format: "full" });
+    expect((res.structuredContent as { summary: { reputation_score: number } }).summary.reputation_score).toBe(50);
+  });
+
+  it("get_pending_balance: returns stringified wei + formatted PHRS, no bigint, no keystore", async () => {
+    const res = await call(tool(tools, "get_pending_balance"), { address: ALPHA });
+    const sc = res.structuredContent as { address: string; withdrawableWei: unknown; formattedPHRS: string };
+    expect(sc.address).toBe(ALPHA);
+    expect(sc.withdrawableWei).toBe("100000000000000"); // string, not bigint (D-6)
+    expect(sc.formattedPHRS).toBe("0.000100");
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+    expect(svc.account).not.toHaveBeenCalled(); // read-only: no signing account resolved
+  });
+
+  it("withdraw_balance: on confirm returns tx hash + amountWei decoded from the Withdrawn event", async () => {
+    const res = await call(tool(tools, "withdraw_balance"), { agentId: "agent-alpha" });
+    const sc = res.structuredContent as { status: string; txHash: string; amountWei: unknown };
+    expect(sc.status).toBe("confirmed");
+    expect(sc.txHash).toBe(TXH);
+    expect(sc.amountWei).toBe("100000000000000");
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+    expect(svc.withdraw).toHaveBeenCalledTimes(1);
+  });
+
+  it("withdraw_balance: pending tx (no decodable amount) surfaces status=pending without amountWei", async () => {
+    svc = fakeService({ withdraw: vi.fn(async () => ({ amount: null, outcome: { status: "pending" as const, hash: TXH } })) });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "withdraw_balance"), { agentId: "agent-alpha" });
+    const sc = res.structuredContent as { status: string; txHash: string; amountWei?: unknown };
+    expect(sc.status).toBe("pending");
+    expect(sc.txHash).toBe(TXH);
+    expect(sc.amountWei).toBeUndefined();
   });
 });
