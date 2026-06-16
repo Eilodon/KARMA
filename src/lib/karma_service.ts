@@ -67,8 +67,16 @@ export interface KarmaService {
   getAgentSkills(addr: Address): Promise<readonly bigint[]>;
   getProviderJobs(addr: Address): Promise<readonly bigint[]>;
   getRequesterJobs(addr: Address): Promise<readonly bigint[]>;
+  /** Withdrawable balance (released escrow awaiting pull-payment), in wei. */
+  getPendingWithdrawal(addr: Address): Promise<bigint>;
+  /** Pull the full withdrawable balance. amount is decoded from the Withdrawn event (null if pending). */
+  withdraw(account: Account): Promise<{ amount: bigint | null; outcome: WriteOutcome }>;
   indexUpsert(doc: SkillDocument): void;
+  /** Remove a skill from the discovery index (e.g. on SkillDeactivated). */
+  indexDiscard(skillId: number): void;
   search(query: string, opts: SkillSearchOptions): SkillSearchHit[];
+  /** First indexed skill doc for an owner (reputation source, 0 RPC), or null. */
+  getByOwner(addr: Address): SkillDocument | null;
 }
 
 function read<T>(functionName: string, args: readonly unknown[]): Promise<T> {
@@ -159,7 +167,15 @@ export const realKarmaService: KarmaService = {
   getAgentSkills: (addr) => read("getAgentSkills", [addr]),
   getProviderJobs: (addr) => read("getProviderJobs", [addr]),
   getRequesterJobs: (addr) => read("getRequesterJobs", [addr]),
+  getPendingWithdrawal: (addr) => read("pendingWithdrawals", [addr]),
+
+  async withdraw(account) {
+    const outcome = await writeContractBounded(account, { functionName: "withdraw", args: [] });
+    return { amount: extractId(outcome, "Withdrawn", "amount"), outcome };
+  },
 
   indexUpsert: (doc) => skillIndex.upsert(doc),
+  indexDiscard: (skillId) => skillIndex.discard(skillId),
   search: (query, opts) => skillIndex.search(query, opts),
+  getByOwner: (addr) => skillIndex.getByOwner(addr),
 };

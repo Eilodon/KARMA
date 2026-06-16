@@ -77,10 +77,10 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 
 ### Layer 1 — KARMA plugin (fully shipped, 2026-06-16)
 
-- Eight in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `get_agent_reputation`, `query_social_graph`.
+- Ten in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `get_agent_reputation`, `query_social_graph`, `get_pending_balance`, `withdraw_balance`.
 - Web3 Secret Storage v3 keystore (`KeystoreManager`): scrypt + aes-128-ctr in-process decrypt. Private keys never exposed — only viem `Account` objects.
 - In-process BM25 skill index (`BM25SkillIndex` via MiniSearch): reputation-boosted ranking, BigInt-safe price/reputation filters, prompt-injection-resistant text sanitization.
-- `SkillEventIndexer`: backfill + live-watch + reconnect on error. Health state (`lastIndexedBlock`, `lastEventAt`, `watching`) available via `SkillEventIndexer.health()` — not yet wired to a tool endpoint.
+- `SkillEventIndexer`: backfill + live-watch + reconnect on error. Started at server boot by `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`), which reconciles chain events into the BM25 index (SkillRegistered → hydrate+upsert, SkillDeactivated → discard, JobCompleted → refresh that skill's reputation). Health state (`lastIndexedBlock`, `lastEventAt`, `watching`) is surfaced through `karma_health` (`indexer` field).
 - Bounded write helper: exactly-once broadcast with `RECEIPT_TIMEOUT_MS=300_000 < MCP_LOCK_TTL_MS=420_000`. Timeout → `pending` outcome; never resend.
 - Exactly-once job guard: `deriveTaskHash(requester, skillId, nonce)` → check-before-write via `findJobByTaskHash`. No double-escrow on lost-ACK retry.
 - All `uint256` amounts and IDs cross the MCP boundary as decimal strings (`jsonSafe`, D-6).
@@ -117,14 +117,16 @@ Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried 
 
 ### Layer 1 — KARMA skill economy tools
 
-- **`karma_health`** — In-process runtime canary; confirms RPC and contract env presence.
+- **`karma_health`** — In-process runtime canary; confirms RPC and contract env presence and reports skill-indexer state (`indexer`: `watching`, `lastIndexedBlock`, `lastEventAt`, or `{ started: false }`).
 - **`register_skill`** — Broadcast `registerSkill(name, description, endpoint, price)` on-chain and upsert into the BM25 index.
 - **`discover_skills`** — BM25 free-text search (prefix + fuzzy) with reputation-boost ranking, `maxPriceWei` and `minReputation` filters.
 - **`create_job`** — Idempotent escrow: derives `taskHash(requester, skillId, nonce)`, checks existing before broadcast. Returns `exists` on replay, `confirmed`/`pending` on new.
 - **`deliver_result`** — Provider submits `resultHash` (bytes32) for an open job.
 - **`complete_job`** — Requester confirms; releases escrow to provider's withdrawable balance and bumps reputation.
 - **`get_agent_reputation`** — Read an agent's skills with reputation scores and invocation counts.
-- **`query_social_graph`** — Job edges for an agent (as provider and as requester).
+- **`query_social_graph`** — Job edges for an agent (as provider and as requester); `format: "full"` hydrates each edge into job details plus a summary.
+- **`get_pending_balance`** — Read an agent's withdrawable balance (`pendingWithdrawals`) in wei and formatted PHRS; accepts an `agentId` or raw `address`.
+- **`withdraw_balance`** — Pull the agent's full released-escrow balance to its wallet, closing the economic loop entirely inside MCP. Returns `amountWei` decoded from the `Withdrawn` event.
 
 ### Explicit non-claims
 
@@ -244,7 +246,7 @@ Storage / telemetry
 │   │   ├── rate_limit.ts
 │   │   └── vault.ts
 │   ├── plugins/
-│   │   ├── karma.tool.ts            ← KARMA skill economy (8 tools, trusted built-in)
+│   │   ├── karma.tool.ts            ← KARMA skill economy (10 tools, trusted built-in)
 │   │   └── system.tool.ts           ← ping + pattern_debt + test_long_task
 │   ├── scripts/
 │   │   ├── _demo_format.ts          ← zero-dep ANSI presentation helpers for the demos
@@ -390,14 +392,16 @@ Agent A (provider)                        Agent B (requester)
 
 | Tool | Type | Description |
 | --- | --- | --- |
-| `karma_health` | read-only | Canary: confirms in-process mode and presence of `PHAROS_RPC_URL` / `PHAROS_CONTRACT_ADDRESS`. |
+| `karma_health` | read-only | Canary: confirms in-process mode and presence of `PHAROS_RPC_URL` / `PHAROS_CONTRACT_ADDRESS`; reports skill-indexer health (`indexer.watching` / `lastIndexedBlock` / `lastEventAt`, or `{ started: false }`). |
 | `register_skill` | write | Broadcast `registerSkill` on-chain and upsert into BM25 index. Returns `pending` if receipt times out. |
 | `discover_skills` | read-only | BM25 free-text search (prefix + fuzzy 0.2, name boost ×2), reputation-boosted ranking, optional `maxPriceWei` and `minReputation` filters. |
 | `create_job` | write (idempotent) | Derive `taskHash(requester, skillId, idempotencyNonce)`, check existing before broadcast. Reply `exists` on replay. |
 | `deliver_result` | write | Provider submits `resultHash` (0x + 64 hex) for an open job. |
 | `complete_job` | write | Requester confirms; escrow credited to provider's withdrawable balance; reputation +5. |
 | `get_agent_reputation` | read-only | Agent's skills with `reputation`, `totalInvocations`, `active`. |
-| `query_social_graph` | read-only | Job edges for an agent: `asProvider` and `asRequester` arrays of job IDs. |
+| `query_social_graph` | read-only | Job edges for an agent: `asProvider` and `asRequester` job-ID arrays (`format: "full"` → hydrated details + summary). |
+| `get_pending_balance` | read-only | Agent's withdrawable balance (`pendingWithdrawals`) as `withdrawableWei` + `formattedPHRS`; accepts `agentId` or `address`. |
+| `withdraw_balance` | write | Pull full released escrow to the agent's wallet; `amountWei` decoded from the `Withdrawn` event. Reverts on-chain if nothing to withdraw. |
 
 ### Required plugin configuration for the app layer
 
@@ -1304,8 +1308,9 @@ pnpm audit --audit-level=high
 | `karma_contract.test.ts` | ABI structural drift guard vs Foundry artifact. |
 | `karma_exactly_once.test.ts` | `deriveTaskHash` / `findJobByTaskHash` exactly-once dedup logic. |
 | `karma_indexer.test.ts` | `SkillEventIndexer` backfill, reconnect, heartbeat state machine. |
+| `skill_indexer_runtime.test.ts` | Chain-event → BM25 reconciliation (`applyIndexedEvent`) and indexer-health surfacing. |
 | `karma_plugin_health.test.ts` | `karma_health` tool: env detection, in-process flag. |
-| `karma_tools.test.ts` | All 7 economy tools over a fake `KarmaService`. |
+| `karma_tools.test.ts` | All 9 economy tools over a fake `KarmaService`. |
 | `karma_write_helper.test.ts` | `runBoundedWrite` confirmed/pending/revert paths. |
 | `bm25_index.test.ts` | `BM25SkillIndex`: upsert, discard, search, reputation boost, price filter, sanitize. |
 | `keystore.test.ts` | Web3 v3 decrypt/encrypt round-trip; MAC mismatch; wrong KDF/cipher. |
@@ -1356,7 +1361,7 @@ Documented in `docs/superpowers/pattern-debt.md`.
 | Debt | Status | Current truth |
 | --- | --- | --- |
 | `PD-001` — pre-existing Layer-0 test failures | **Resolved** (2026-06-16, commit `db7ea72`) | 8 stale tests aligned to post-hardening code; 1 env-locked test skip-guarded. Full suite: 315 passed, 1 skipped, 0 failed. |
-| `PD-002` — network glue has live-only coverage | **Open** | `writeContractBounded`, `realKarmaService` reads, and `startSkillIndexer` have no automated test. Decoupled policy cores are unit-tested; viem/keystore wiring is verified only by the live P7 demo. |
+| `PD-002` — network glue has live-only coverage | **Open (reduced)** | `writeContractBounded` and `realKarmaService` reads are still verified only by the live P7 demo. The indexer wiring is now unit-tested: `mapLog`/`toIndexedEvents`/`buildViemIndexerDeps` (`karma_indexer.test.ts`) cover log decoding + deps construction against a fake client, so only the trivial `startSkillIndexer` singleton resolution (`getPublicClient`/`getContractAddress` + `new` + `start`) remains demo-only. The same injectable-client pattern can close the read/write paths next. |
 | `PD-003` — exactly-once guard is O(n) scan | **Open** | `findJobByTaskHash` scans all of `getRequesterJobs(requester)` per `create_job` call. Correct at demo scale; degrades as requester accumulates jobs. Resolution: add on-chain `jobByTaskHash` mapping in contract v2 when `jobCount() > 1000` or any requester owns > 100 jobs. |
 
 Non-goals intentionally preserved:
@@ -1421,7 +1426,7 @@ The transaction was broadcast but the receipt did not arrive before `RECEIPT_TIM
 
 ### `discover_skills` returns 0 results after restart
 
-The in-process BM25 index is rebuilt from `SkillEventIndexer` on startup. Wait for the indexer to finish backfilling — there is no tool endpoint exposing indexer state yet; check process logs for indexer activity. If the indexer never started, ensure `PHAROS_CONTRACT_ADDRESS` is set and the contract is accessible.
+The in-process BM25 index is rebuilt from `SkillEventIndexer` on startup. Wait for the indexer to finish backfilling — call `karma_health` and watch the `indexer` field (`watching: true` with a non-zero `lastIndexedBlock` means it has caught up). If `indexer` reports `{ started: false }`, the indexer never started — ensure `PHAROS_CONTRACT_ADDRESS` is set, `MCP_SAFE_MODE` is off, and the contract is accessible.
 
 ### `MCP_SAFE_MODE=true` blocks `karma_health` and all economy tools
 
@@ -1492,5 +1497,5 @@ Recommended next work:
 - Add `AwsKmsKeyRegistry` unit tests — requires a live AWS KMS endpoint or a LocalStack mock.
 - Run `pnpm migrate:encryption` once per tenant after enabling `KMS_PROVIDER` to re-encrypt all pre-V4 blobs before offering a formal erasure SLA.
 - Keep monitoring MCP TypeScript SDK public Tasks support before replacing the local adapter (`DEBT-003`, monitoring).
-- The `SkillEventIndexer` currently uses `fromBlock=0n` on restart (full backfill). Add a persisted `lastIndexedBlock` checkpoint to reduce startup time as the chain grows.
-- Wire `SkillEventIndexer.health()` into a tool endpoint (e.g., extend `karma_health`) so operators can observe `lastIndexedBlock`, `lastEventAt`, and `watching` state without inspecting logs.
+- The `SkillEventIndexer` defaults to `fromBlock=0` on restart (full backfill); set `KARMA_INDEXER_FROM_BLOCK` to skip ahead. Add a *persisted* `lastIndexedBlock` checkpoint to reduce startup time automatically as the chain grows.
+- ✅ Done — `SkillEventIndexer.health()` is now wired into `karma_health` via `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`); operators observe `lastIndexedBlock` / `lastEventAt` / `watching` without inspecting logs. The event-reconciliation logic (`applyIndexedEvent`) and the viem glue (`mapLog`/`buildViemIndexerDeps`) are unit-tested (`skill_indexer_runtime.test.ts`, `karma_indexer.test.ts`); only the trivial `startSkillIndexer` singleton resolution remains demo-only (`PD-002`, reduced).

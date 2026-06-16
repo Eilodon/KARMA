@@ -8,6 +8,7 @@ import { createServerCard } from "./http/server_card.js";
 import { protectedResourceMetadata, resourceMetadataPath } from "./http/oauth_metadata.js";
 import { protocolHeaderValidation } from "./middlewares/protocol_header.js";
 import { createStdioTransport, loadHttpServerAdapters } from "./mcp/adapter/mcp_protocol_adapter.js";
+import { startKarmaIndexer, stopKarmaIndexer } from "./lib/skill_indexer_runtime.js";
 
 let runtime: SuperMcpRuntime;
 
@@ -56,6 +57,20 @@ async function main() {
       "[KARMA] WARNING: ENABLE_RATE_LIMIT and/or ENABLE_QUOTA are disabled. " +
       "Set both to true to prevent request flooding and resource exhaustion."
     );
+  }
+
+  // Start the on-chain skill indexer (backfill + live watch) so discover_skills reflects chain
+  // state and karma_health can report indexer progress. Skipped in safe mode (network blocked) or
+  // when no contract is configured. Failure here is non-fatal — the server still serves tools.
+  if (!ENV.MCP_SAFE_MODE && process.env.PHAROS_CONTRACT_ADDRESS) {
+    try {
+      startKarmaIndexer();
+      console.error("[KARMA] Skill event indexer started (backfill + live watch).");
+    } catch (err) {
+      console.error("[KARMA] Skill indexer failed to start (continuing without it):", err);
+    }
+  } else {
+    console.error("[KARMA] Skill indexer not started (safe mode or PHAROS_CONTRACT_ADDRESS unset).");
   }
 
   if (ENV.TRANSPORT_DRIVER === "http") {
@@ -206,6 +221,8 @@ async function main() {
           (runtime as any)._httpServer.close((err: unknown) => err ? reject(err instanceof Error ? err : new Error("Server close failed", { cause: err })) : resolve());
         });
       }
+
+      stopKarmaIndexer();
 
       const { globalTaskTracker } = await import("./core/task_tracker.js");
       globalTaskTracker.beginDraining();

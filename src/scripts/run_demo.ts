@@ -1,6 +1,6 @@
 import { formatEther, type Address } from "viem";
 import { keystoreManager } from "../lib/keystore.js";
-import { getPublicClient, writeContractBounded } from "../lib/contract.js";
+import { getPublicClient } from "../lib/contract.js";
 import karmaTools from "../plugins/karma.tool.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
 import { markTrustedRuntime } from "../core/runtime_identity.js";
@@ -90,13 +90,11 @@ async function main(): Promise<void> {
   const comp = await call("complete_job", { agentId: "agent-beta", jobId });
   txs.push({ label: "complete_job", hash: String(comp.txHash) });
 
-  console.log(step(5, 5, "Alpha withdraws the escrow payout"));
-  const wd = await writeContractBounded(keystoreManager.getAccount("agent-alpha"), {
-    functionName: "withdraw",
-    args: [],
-  });
-  console.log(`  ${C.green("→")} withdraw ${wd.status} tx=${short(wd.hash)}`);
-  txs.push({ label: "withdraw", hash: wd.hash });
+  console.log(step(5, 5, "Alpha checks the released balance and withdraws — full loop stays inside MCP"));
+  await call("get_pending_balance", { agentId: "agent-alpha" });
+  const wd = await call("withdraw_balance", { agentId: "agent-alpha" });
+  if (wd.status !== "confirmed") throw new Error(`withdraw_balance not confirmed: ${JSON.stringify(wd)}`);
+  txs.push({ label: "withdraw", hash: String(wd.txHash) });
 
   console.log(`\n${C.bold("Balances")}  Alpha=${C.magenta(await bal(alpha))} PHRS   Beta=${C.blue(await bal(beta))} PHRS`);
 
