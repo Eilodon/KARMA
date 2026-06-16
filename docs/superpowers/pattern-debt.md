@@ -7,7 +7,7 @@ Queried by: kb-query skill
 <!-- ENTRIES BELOW — do not delete, update status field instead -->
 
 ## PD-001 — Pre-existing Layer-0 test:enterprise failures (inherited from main)
-- **status:** OPEN (pre-existing, out of KARMA-app-layer scope)
+- **status:** RESOLVED 2026-06-16 (commit db7ea72) — 8 stale tests fixed, 1 env-locked test skip-guarded; full suite 315 passed | 1 skipped | 0 failed
 - **discovered:** 2026-06-15 during P1.1 verification
 - **evidence:** On clean base (commit b23dadc/7829254, before any KARMA change) `pnpm test:enterprise`
   fails 7 tests across 3 files, reproducible in isolation:
@@ -24,7 +24,7 @@ Queried by: kb-query skill
   - `plugin_external_runner.test.ts` ×1 — **GENUINELY ENV-LOCKED**: this Node v20.20.2 build rejects `--permission` (`bad option`) despite the version guard (plugin_external_runner.ts:71). Fix: probe actual flag support and `it.skip` when unsupported (best-effort feature).
 - **impact on KARMA work:** none — none are in KARMA files; KARMA introduced ZERO new failures (verified by toggling `.env`, see below).
 - **regression caught + fixed 2026-06-16:** the KARMA `.env` set `MCP_PLUGIN_ISOLATION_MODE=policy`, which dotenv auto-loads into `env_validation`'s "defaults to external" test → +1 failure. Fixed by trimming `.env` to Pharos-only config (MCP_* runtime flags moved to the run command).
-- **action:** stale-test fixes are safe Layer-0 maintenance (code is the intended hardened behavior). Awaiting owner go-ahead to apply.
+- **action:** DONE — 8 stale tests aligned to the intended hardened code, env-locked test skip-guarded (commit db7ea72). Code behavior unchanged; only tests touched.
 
 ## PD-002 — KARMA network glue has live-only coverage
 - **status:** OPEN
