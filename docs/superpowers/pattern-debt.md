@@ -93,5 +93,21 @@ Queried by: kb-query skill
   institutional-skill customer needs consensus-level enforcement OR a staking/identity primitive
   lands that makes reputation Sybil-costly. Build it alongside PD-003's `jobByTaskHash` change to
   avoid a second migration; demote the index threshold to a cache of the on-chain value.
-- **action:** track; Phase 2 design is locked in the plan, not built.
+- **action:** track; Phase 2 design is locked in the plan, not built. Now bundled with Claim 3
+  escrow resolution into Workstream B (`specs/2026-06-17-agentskillregistry-v2-design.md`).
+
+## PD-006 — Tenant-mismatch has no dedicated telemetry / alarm signal
+- **status:** OPEN (new 2026-06-17, ADR 2026-06-17-app-layer-stride-hardening)
+- **discovered:** 2026-06-17 during A1 (tenant→agent isolation), flagged by audit-design L6
+- **evidence:** `KeystoreManager.assertOwnedBy` throws on a tenant/agent mismatch; the execution
+  pipeline catches it as a generic `tool_execution_failed` telemetry event (with the tool name but
+  no mismatch-specific marker). `src/plugins/karma.tool.ts` imports no telemetry seam, so a spoof
+  attempt cannot be distinguished from an ordinary tool failure for security monitoring/alerting.
+- **root cause:** the plugin is pure orchestration over `KarmaService` with no telemetry dependency
+  (by design, for unit-testability); adding a distinct security signal needs either a telemetry seam
+  in the service boundary or a typed-error classifier in the pipeline.
+- **resolution_trigger:** When `tool_execution_failed` events attributable to tenant binding exceed
+  10 in any 1-hour window, OR the first multi-tenant HTTP customer onboards — add a dedicated
+  `tenant_agent_mismatch` telemetry event + alarm.
+- **action:** track; defense is fail-closed already (access denied), this is observability only.
 
