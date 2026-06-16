@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createKarmaTools } from "../plugins/karma.tool.js";
 import type { KarmaService, OnchainSkill } from "../lib/karma_service.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
+import { markTrustedRuntime } from "../core/runtime_identity.js";
 
 const ALPHA = "0x857c2F11E9EDDdC7DDc03d035B0998De3c7677ec" as const;
 const TXH = "0xabc123" as const;
@@ -70,6 +71,7 @@ describe("P6 KARMA tools", () => {
   let tools: ToolDefinition[];
   let svc: KarmaService;
   beforeEach(() => {
+    markTrustedRuntime(); // these unit tests run in-process; declare trust for the canary
     svc = fakeService();
     tools = createKarmaTools(svc);
   });

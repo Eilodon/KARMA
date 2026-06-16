@@ -1,6 +1,7 @@
 import { keystoreManager } from "../lib/keystore.js";
 import karmaTools from "../plugins/karma.tool.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
+import { markTrustedRuntime } from "../core/runtime_identity.js";
 
 /**
  * Read-only on-chain verification of the post-demo state via the read tools.
@@ -13,6 +14,7 @@ const tool = (name: string): ToolDefinition => {
 };
 
 async function main(): Promise<void> {
+  markTrustedRuntime(); // this script drives karma.tool read handlers in-process — declare trust for the canary
   const password = process.env.KEYSTORE_PASSWORD;
   if (!password) throw new Error("Set KEYSTORE_PASSWORD.");
   await keystoreManager.load(process.env.KEYSTORE_PATH ?? "./keystore.json", password);

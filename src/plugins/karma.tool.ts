@@ -3,6 +3,7 @@ import type { Address, Hash } from "viem";
 import type { ToolDefinition, ToolResult } from "../mcp/adapter/tool_registry.js";
 import { jsonSafe } from "../lib/serialize.js";
 import { realKarmaService, type KarmaService } from "../lib/karma_service.js";
+import { isTrustedRuntime } from "../core/runtime_identity.js";
 
 /**
  * KARMA Skill-Economy plugin (Layer 1).
@@ -12,14 +13,20 @@ import { realKarmaService, type KarmaService } from "../lib/karma_service.js";
  * KEYSTORE_*) only survive in-process — the external child-process worker forks per call
  * and strips env via workerEnv(). `assertInProcess()` is the fail-fast canary for that.
  *
+ * The canary is FAIL-CLOSED: it requires positive proof that this is the trusted runtime
+ * (isTrustedRuntime(), set only by PluginLoader.loadAll in the parent). A future runner that
+ * loads karma.tool without marking trust is denied by default — the legacy KARMA_PLUGIN_WORKER
+ * env var stays as a secondary signal, but absence of it no longer implies in-process.
+ *
  * Tools are pure orchestration over a KarmaService (the network/keystore/index boundary), so
  * they unit-test against a fake; createKarmaTools(realKarmaService) wires the live system.
  */
 function assertInProcess(): void {
-  if (process.env.KARMA_PLUGIN_WORKER === "1") {
+  if (!isTrustedRuntime() || process.env.KARMA_PLUGIN_WORKER === "1") {
     throw new Error(
-      "[KARMA] karma.tool.ts must run in-process (trusted built-in), not the external worker. " +
-        "Set MCP_PLUGIN_ISOLATION_MODE=policy and keep karma.tool in isTrustedBuiltInPlugin().",
+      "[KARMA] karma.tool.ts must run in the trusted in-process runtime (trusted built-in), not the " +
+        "external worker. Ensure PluginLoader.loadAll marks the runtime trusted, keep karma.tool in " +
+        "isTrustedBuiltInPlugin(), and use MCP_PLUGIN_ISOLATION_MODE=policy.",
     );
   }
 }

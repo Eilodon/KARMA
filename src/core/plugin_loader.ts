@@ -7,6 +7,7 @@ import { z } from "zod/v4";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
 import { ChildProcessPluginRunner } from "./plugin_external_runner.js";
 import type { IPluginRunner } from "./plugin_runner.js";
+import { markTrustedRuntime } from "./runtime_identity.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +96,10 @@ export interface PluginLoaderOptions {
 
 export class PluginLoader {
   static async loadAll<T = Record<string, unknown>>(options: PluginLoaderOptions = {}): Promise<ToolDefinition<T>[]> {
+    // This loader only ever runs in the trusted parent — the external worker loads plugins
+    // through plugin_worker.loadTools(), never here. Marking the runtime trusted is what makes
+    // the karma.tool canary (assertInProcess) fail-closed against unknown/future runners (D-1).
+    markTrustedRuntime();
     const pluginDir = pluginsDir();
     const runner = options.pluginRunner ?? new ChildProcessPluginRunner();
     const allowlist = new Set(parseList(ENV.MCP_PLUGIN_ALLOWLIST));

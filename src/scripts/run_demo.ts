@@ -3,6 +3,7 @@ import { keystoreManager } from "../lib/keystore.js";
 import { getPublicClient, writeContractBounded } from "../lib/contract.js";
 import karmaTools from "../plugins/karma.tool.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
+import { markTrustedRuntime } from "../core/runtime_identity.js";
 
 /**
  * Self-referential KARMA demo: Agent Alpha registers the very `discover_skills` tool as a paid
@@ -33,6 +34,7 @@ async function call(name: string, args: unknown): Promise<Record<string, unknown
 }
 
 async function main(): Promise<void> {
+  markTrustedRuntime(); // this demo drives karma.tool handlers in-process — declare trust for the canary
   if (!PASSWORD) throw new Error("Set KEYSTORE_PASSWORD.");
   if (!process.env.PHAROS_CONTRACT_ADDRESS) throw new Error("Set PHAROS_CONTRACT_ADDRESS (deploy first).");
   await keystoreManager.load(KEYSTORE_PATH, PASSWORD);
