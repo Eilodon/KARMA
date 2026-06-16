@@ -71,7 +71,7 @@ export class VaultKeyRegistry implements ITenantKeyRegistry {
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err: unknown = await res.json().catch(() => ({}));
       throw new Error(`Vault POST ${path} failed (${res.status}): ${JSON.stringify(err)}`);
     }
     return res.json() as Promise<T>;

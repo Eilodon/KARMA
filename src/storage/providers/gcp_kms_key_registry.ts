@@ -92,7 +92,7 @@ export class GcpKmsKeyRegistry implements ITenantKeyRegistry {
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err: unknown = await res.json().catch(() => ({}));
       throw new Error(`GCP KMS ${resourcePath}:${action} failed (${res.status}): ${JSON.stringify(err)}`);
     }
     return res.json() as Promise<T>;

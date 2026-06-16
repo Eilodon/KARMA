@@ -14,7 +14,10 @@ export default tseslint.config(
   {
     plugins: { n },
     rules: {
-      "n/no-unsupported-features/node-builtins": ["error", { version: ">=20.3.0" }],
+      // fetch/Response are global and usable on the Node 20.3 floor (global since Node 18);
+      // the rule only marks them "experimental until 21" — ignore those two specifically while
+      // still catching genuinely newer builtins. Used by the KMS providers + their tests.
+      "n/no-unsupported-features/node-builtins": ["error", { version: ">=20.3.0", ignores: ["fetch", "Response"] }],
     },
   },
 
@@ -76,6 +79,7 @@ export default tseslint.config(
     files: [
       "src/telemetry/file_logger.ts",
       "src/storage/local_fs.ts",
+      "src/storage/audit_store.ts",
       "src/core/plugin_loader.ts",
       "src/scripts/**/*.ts",
     ],

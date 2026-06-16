@@ -2,10 +2,8 @@ import { createCipheriv, randomBytes } from "node:crypto";
 import type {
   CryptoErasureReceipt,
   ITenantKeyRegistry,
-  KeyAuditEvent,
   KeyScope,
   SealedBlob,
-  TenantKeyRecord,
 } from "./key_registry.js";
 import type { IAuditStore } from "./audit_store.js";
 
