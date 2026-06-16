@@ -4,6 +4,7 @@ import { createKarmaTools } from "../plugins/karma.tool.js";
 import type { KarmaService, OnchainSkill } from "../lib/karma_service.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
 import { markTrustedRuntime } from "../core/runtime_identity.js";
+import { withRequestContext } from "../security/context.js";
 
 const ALPHA = "0x857c2F11E9EDDdC7DDc03d035B0998De3c7677ec" as const;
 const TXH = "0xabc123" as const;
@@ -342,5 +343,49 @@ describe("P6 KARMA tools", () => {
     expect(sc.status).toBe("pending");
     expect(sc.txHash).toBe(TXH);
     expect(sc.amountWei).toBeUndefined();
+  });
+});
+
+describe("A1 tenant isolation (STRIDE-S)", () => {
+  beforeEach(() => markTrustedRuntime());
+
+  it("threads the caller's tenantId into svc.account (default ctx = tenant_local)", async () => {
+    const svc = fakeService();
+    const tools = createKarmaTools(svc);
+    await call(tool(tools, "withdraw_balance"), { agentId: "agent-alpha" });
+    expect(svc.account).toHaveBeenCalledWith("agent-alpha", "tenant_local");
+  });
+
+  it("threads tenantId into addressOf for read tools using agentId", async () => {
+    const svc = fakeService();
+    const tools = createKarmaTools(svc);
+    await call(tool(tools, "get_pending_balance"), { agentId: "agent-alpha" });
+    expect(svc.addressOf).toHaveBeenCalledWith("agent-alpha", "tenant_local");
+  });
+
+  it("a foreign tenant cannot drive another tenant's agent (no on-chain write)", async () => {
+    const svc = fakeService({
+      account: vi.fn((_agentId: string, tenantId: string) => {
+        if (tenantId !== "tenant_local") {
+          throw new Error("[KARMA] agent 'agent-alpha' is not accessible to this tenant");
+        }
+        return { address: ALPHA } as never;
+      }),
+    });
+    const tools = createKarmaTools(svc);
+    await expect(
+      withRequestContext(
+        { tenantId: "evil", userId: "u", clientId: "c", scopes: [], requestId: "r", authType: "gateway" },
+        () => call(tool(tools, "create_job"), { agentId: "agent-alpha", skillId: "7", idempotencyNonce: 1 }),
+      ),
+    ).rejects.toThrow(/not accessible to this tenant/i);
+    expect(svc.createJob).not.toHaveBeenCalled();
+  });
+
+  it("the raw-address read path needs no tenant (on-chain public data)", async () => {
+    const svc = fakeService();
+    const tools = createKarmaTools(svc);
+    await call(tool(tools, "get_pending_balance"), { address: ALPHA });
+    expect(svc.addressOf).not.toHaveBeenCalled();
   });
 });

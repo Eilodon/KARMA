@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { privateKeyToAccount } from "viem/accounts";
 import { KeystoreManager, encryptPrivateKeyV3 } from "../lib/keystore.js";
+import { ENV } from "../config/env.js";
 
 // Authoritative Web3 Secret Storage v3 (scrypt) vector produced by go-ethereum via
 // `cast wallet import` (password "testpassword"). Cross-impl: geth ENCRYPT ↔ KARMA DECRYPT.
@@ -66,5 +67,41 @@ describe("KeystoreManager — Web3 Secret Storage v3 (scrypt)", () => {
     const km = new KeystoreManager();
     await km.load(rtPath, "pw123");
     expect(km.getAddress("rt")).toBe(privateKeyToAccount(KNOWN_PK).address);
+  });
+});
+
+describe("KeystoreManager tenant binding (A1, STRIDE-S)", () => {
+  it("assertOwnedBy: an agent with no tenant field binds to the default tenant", async () => {
+    const km = new KeystoreManager();
+    await km.load(fixturePath, "testpassword");
+    const defaultTenant = ENV.KARMA_DEFAULT_AGENT_TENANT ?? ENV.MCP_TENANT_ID;
+    expect(() => km.assertOwnedBy("vector", defaultTenant)).not.toThrow();
+  });
+
+  it("assertOwnedBy: rejects a tenant that does not own the agent (generic message, no owner leak)", async () => {
+    const km = new KeystoreManager();
+    await km.load(fixturePath, "testpassword");
+    expect(() => km.assertOwnedBy("vector", "some-other-tenant")).toThrow(/not accessible to this tenant/i);
+    try {
+      km.assertOwnedBy("vector", "some-other-tenant");
+    } catch (e) {
+      expect(String((e as Error).message)).not.toContain(ENV.MCP_TENANT_ID);
+    }
+  });
+
+  it("assertOwnedBy: honors an explicit per-agent tenant", async () => {
+    const crypto = await encryptPrivateKeyV3(KNOWN_PK, "pw", { n: 4096 });
+    const p = join(dir, "tenant.json");
+    writeFileSync(p, JSON.stringify({ version: 3, agents: [{ agentId: "t1", tenant: "tenant-a", crypto }] }));
+    const km = new KeystoreManager();
+    await km.load(p, "pw");
+    expect(() => km.assertOwnedBy("t1", "tenant-a")).not.toThrow();
+    expect(() => km.assertOwnedBy("t1", "tenant-b")).toThrow(/not accessible/i);
+  });
+
+  it("assertOwnedBy: unknown agent throws not-found (checked before tenant)", async () => {
+    const km = new KeystoreManager();
+    await km.load(fixturePath, "testpassword");
+    expect(() => km.assertOwnedBy("nope", "any")).toThrow(/Agent not found/i);
   });
 });

@@ -8,6 +8,8 @@ export interface AgentIdentity {
   agentId: string;
   address: Address;
   account: ManagedAccount;
+  /** Owning tenant, resolved at load: entry.tenant ?? default agent tenant (fail-closed binding). */
+  tenant: string;
 }
 
 /** Web3 Secret Storage v3 crypto block (scrypt KDF variant). */
@@ -33,6 +35,8 @@ export interface KeystoreFileV3 {
   agents: Array<{
     agentId: string;
     address?: string;
+    /** Owning tenant; absent ⇒ bound to KARMA_DEFAULT_AGENT_TENANT ?? MCP_TENANT_ID (fail-closed). */
+    tenant?: string;
     crypto: CryptoV3;
   }>;
 }

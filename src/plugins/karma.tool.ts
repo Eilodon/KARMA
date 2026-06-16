@@ -4,6 +4,7 @@ import type { ToolDefinition, ToolResult } from "../mcp/adapter/tool_registry.js
 import { jsonSafe } from "../lib/serialize.js";
 import { realKarmaService, type KarmaService } from "../lib/karma_service.js";
 import { isTrustedRuntime } from "../core/runtime_identity.js";
+import { getRequestContext } from "../security/context.js";
 import { getKarmaIndexerHealth } from "../lib/skill_indexer_runtime.js";
 import type { JobDetail, JobStatus, SocialGraphFullResult } from "../lib/types.js";
 
@@ -68,9 +69,13 @@ const karmaHealth: ToolDefinition = {
   },
 };
 
-/** Resolve a target address from either an agentId (keystore) or a raw address. */
-function resolveAddress(svc: KarmaService, a: { agentId?: string; address?: string }): Address {
-  if (a.agentId) return svc.addressOf(a.agentId);
+/**
+ * Resolve a target address from either an agentId (keystore, tenant-checked) or a raw address.
+ * The agentId path asserts the calling tenant owns the agent (STRIDE-S); the raw-address path is
+ * unauthenticated on purpose — an address is public on-chain data.
+ */
+function resolveAddress(svc: KarmaService, a: { agentId?: string; address?: string }, tenantId: string): Address {
+  if (a.agentId) return svc.addressOf(a.agentId, tenantId);
   if (a.address) return a.address as Address;
   throw new Error("[KARMA] provide either agentId or address");
 }
@@ -178,7 +183,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         pricePerCallWei: WEI,
         minReputationToInvoke: z.number().int().min(0).max(100).default(0),
       }).parse(args);
-      const account = svc.account(a.agentId);
+      const { tenantId } = getRequestContext();
+      const account = svc.account(a.agentId, tenantId);
       const { skillId, outcome } = await svc.registerSkill(account, {
         name: a.name,
         description: a.description,
@@ -263,7 +269,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         idempotencyNonce: z.number().int().positive(),
         deadlineSecs: z.number().int().positive().max(2_592_000).optional(),
       }).parse(args);
-      const account = svc.account(a.agentId);
+      const { tenantId } = getRequestContext();
+      const account = svc.account(a.agentId, tenantId);
       const requester = account.address;
       const skillId = BigInt(a.skillId);
       const skill = await svc.readSkill(skillId);
@@ -335,7 +342,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     handler: async (args) => {
       assertInProcess();
       const a = z.object({ agentId: z.string(), jobId: WEI, resultHash: RESULT_HASH }).parse(args);
-      const outcome = await svc.deliverResult(svc.account(a.agentId), {
+      const { tenantId } = getRequestContext();
+      const outcome = await svc.deliverResult(svc.account(a.agentId, tenantId), {
         jobId: BigInt(a.jobId),
         resultHash: a.resultHash as Hash,
       });
@@ -358,7 +366,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     handler: async (args) => {
       assertInProcess();
       const a = z.object({ agentId: z.string(), jobId: WEI }).parse(args);
-      const outcome = await svc.confirmCompletion(svc.account(a.agentId), { jobId: BigInt(a.jobId) });
+      const { tenantId } = getRequestContext();
+      const outcome = await svc.confirmCompletion(svc.account(a.agentId, tenantId), { jobId: BigInt(a.jobId) });
       return reply(`[KARMA] complete_job job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
         status: outcome.status,
         jobId: a.jobId,
@@ -380,7 +389,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     handler: async (args) => {
       assertInProcess();
       const a = z.object({ agentId: z.string().optional(), address: z.string().optional() }).parse(args);
-      const address = resolveAddress(svc, a);
+      const { tenantId } = getRequestContext();
+      const address = resolveAddress(svc, a, tenantId);
       const skillIds = await svc.getAgentSkills(address);
       const skills = await Promise.all(
         skillIds.map(async (id) => {
@@ -426,7 +436,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         address: z.string().optional(),
         format: z.enum(["ids", "full"]).default("ids"),
       }).parse(args);
-      const address = resolveAddress(svc, a);
+      const { tenantId } = getRequestContext();
+      const address = resolveAddress(svc, a, tenantId);
 
       if (a.format === "full") {
         const result = await handleFullFormat(address, svc);
@@ -461,7 +472,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     handler: async (args) => {
       assertInProcess();
       const a = z.object({ agentId: z.string().optional(), address: z.string().optional() }).parse(args);
-      const address = resolveAddress(svc, a);
+      const { tenantId } = getRequestContext();
+      const address = resolveAddress(svc, a, tenantId);
       const wei = await svc.getPendingWithdrawal(address);
       return reply(`[KARMA] pending balance for ${address}: ${weiToPhrs6(wei)} PHRS`, {
         address,
@@ -486,7 +498,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     handler: async (args) => {
       assertInProcess();
       const a = z.object({ agentId: z.string() }).parse(args);
-      const { amount, outcome } = await svc.withdraw(svc.account(a.agentId));
+      const { tenantId } = getRequestContext();
+      const { amount, outcome } = await svc.withdraw(svc.account(a.agentId, tenantId));
       if (outcome.status === "pending" || amount == null) {
         return reply(`[KARMA] withdraw_balance broadcast; receipt pending tx=${outcome.hash}`, {
           status: "pending",

@@ -48,8 +48,10 @@ export interface OnchainJob {
 }
 
 export interface KarmaService {
-  account(agentId: string): Account;
-  addressOf(agentId: string): Address;
+  /** Resolve the signing account for an agent, asserting the calling tenant owns it (STRIDE-S). */
+  account(agentId: string, tenantId: string): Account;
+  /** Resolve an agent's address, asserting the calling tenant owns it (STRIDE-S). */
+  addressOf(agentId: string, tenantId: string): Address;
   registerSkill(
     account: Account,
     p: { name: string; description: string; mcpEndpoint: string; pricePerCall: bigint },
@@ -108,8 +110,14 @@ function extractId(outcome: WriteOutcome, eventName: string, argName: string): b
 }
 
 export const realKarmaService: KarmaService = {
-  account: (agentId) => keystoreManager.getAccount(agentId),
-  addressOf: (agentId) => keystoreManager.getAddress(agentId),
+  account: (agentId, tenantId) => {
+    keystoreManager.assertOwnedBy(agentId, tenantId);
+    return keystoreManager.getAccount(agentId);
+  },
+  addressOf: (agentId, tenantId) => {
+    keystoreManager.assertOwnedBy(agentId, tenantId);
+    return keystoreManager.getAddress(agentId);
+  },
 
   async registerSkill(account, p) {
     const outcome = await writeContractBounded(account, {
