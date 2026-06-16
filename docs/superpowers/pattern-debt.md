@@ -27,17 +27,24 @@ Queried by: kb-query skill
 - **action:** DONE — 8 stale tests aligned to the intended hardened code, env-locked test skip-guarded (commit db7ea72). Code behavior unchanged; only tests touched.
 
 ## PD-002 — KARMA network glue has live-only coverage
-- **status:** OPEN
+- **status:** OPEN (reduced 2026-06-16, ADR 2026-06-16-karma-graph-withdraw-indexer)
 - **discovered:** 2026-06-16 during P4–P6 (ADR 2026-06-16-karma-app-layer)
-- **evidence:** `writeContractBounded`, `realKarmaService` reads, and `startSkillIndexer` have no
-  automated test. The decoupled policy cores are unit-tested (`runBoundedWrite`, `findJobByTaskHash`,
-  `SkillEventIndexer` state machine, `BM25SkillIndex`); the viem/keystore wiring is verified only by
-  the live P7 demo. The ABI drift-guard catches `.sol`↔`abi.ts` shape drift but not return-decoding bugs.
+- **evidence:** `writeContractBounded` and `realKarmaService` reads still have no automated test
+  (verified only by the live P7 demo); the ABI drift-guard catches `.sol`↔`abi.ts` shape drift but
+  not return-decoding bugs.
+- **update (2026-06-16):** the indexer half is now unit-tested — `mapLog`/`toIndexedEvents`/
+  `buildViemIndexerDeps` decode + deps-construction are covered against a fake `IndexerEventClient`
+  (`karma_indexer.test.ts`), and `applyIndexedEvent` reconciliation in `skill_indexer_runtime.test.ts`.
+  Only the trivial `startSkillIndexer` singleton resolution (`getPublicClient`/`getContractAddress` +
+  `new` + `start`) remains demo-only. The original trigger ("when `realKarmaService` is modified")
+  FIRED this cycle (added `getByOwner`/`indexDiscard`/`getPendingWithdrawal`/`withdraw`) and was
+  partially actioned; re-scoped below so it no longer fires on unrelated service edits.
 - **root cause:** viem's heavy generics make the glue costly to type/mock; DI seam pushed the testable
   logic out, leaving thin-but-untested wiring.
-- **resolution_trigger:** When `realKarmaService` is next modified, OR a return-shape bug reaches the
-  demo — add a forked-anvil/testnet integration test for register→create→deliver→complete→withdraw.
-- **action:** track; address on next contract/service change.
+- **resolution_trigger:** When the `readContract`/`writeContractBounded` return-DECODE paths change
+  (new contract function consumed, `jobs()`/`skills()` tuple reshaped) OR a return-shape bug reaches
+  the demo — add a forked-anvil/testnet integration test for register→create→deliver→complete→withdraw.
+- **action:** track; address on next contract/decode-path change.
 
 ## PD-003 — Exactly-once guard is an O(n) on-chain scan
 - **status:** OPEN
@@ -49,4 +56,17 @@ Queried by: kb-query skill
 - **resolution_trigger:** When deployed `jobCount()` > 1000 OR any requester owns > 100 jobs — add an
   on-chain `jobByTaskHash` mapping in contract v2 and switch the guard to an O(1) lookup.
 - **action:** track; revisit at scale (ADR Next Cycle Trigger).
+
+## PD-004 — Skill indexer has no persisted checkpoint
+- **status:** OPEN
+- **discovered:** 2026-06-16 (ADR 2026-06-16-karma-graph-withdraw-indexer)
+- **evidence:** `startKarmaIndexer` backfills from block 0 on every boot (`KARMA_INDEXER_FROM_BLOCK`
+  env override only); there is no persisted `lastIndexedBlock`, so cold-start cost grows linearly
+  with chain length.
+- **root cause:** `IStateStore` is keyed by `tenantId` over `BaseState<phase>` (MCP state-machine
+  shape) — wrong abstraction for a single block-number checkpoint; a correct fix needs its own
+  persistence with fs/redis/memory parity. Deferred as low-payoff on a fresh testnet.
+- **resolution_trigger:** When deployed `jobCount()` > 1000 OR observed cold-start backfill > 10s —
+  add a persisted `lastIndexedBlock` checkpoint (own store, driver parity) read as `fromBlock` on boot.
+- **action:** track; address alongside PD-002's integration-test work or first multi-instance deploy.
 
