@@ -13,10 +13,11 @@ describe("pattern debt registry reconciliation", () => {
     expect(byId.get("DEBT-001")?.runtimeGuards.join("\n")).toContain("without PATH");
     expect(byId.get("DEBT-001")?.runtimeGuards.join("\n")).toContain("node-permission-best-effort");
 
-    expect(byId.get("DEBT-002")?.status).toBe("open");
-    expect(byId.get("DEBT-002")?.currentControl).toContain("type-only ITenantKeyRegistry");
-    expect(byId.get("DEBT-002")?.limitation).toContain("No v3 runtime encryption path");
-    expect(byId.get("DEBT-002")?.currentControl).not.toContain("crypto-erasure is implemented");
+    expect(byId.get("DEBT-002")?.status).toBe("implemented");
+    expect(byId.get("DEBT-002")?.currentControl).toContain("smcp:v4:kms");
+    expect(byId.get("DEBT-002")?.currentControl).toContain("crypto-erasure is implemented");
+    expect(byId.get("DEBT-002")?.limitation).toContain("7-day");
+    expect(byId.get("DEBT-002")?.implementationGate).toContain("local");
 
     expect(byId.get("DEBT-003")?.status).toBe("monitoring");
     expect(byId.get("DEBT-003")?.implementationGate).toContain("Do not reintroduce check_task_status or isAsync");
@@ -37,12 +38,12 @@ describe("pattern debt registry reconciliation", () => {
     const summary = getPatternDebtSummary();
 
     expect(summary.activeIds).toContain("DEBT-001");
-    expect(summary.activeIds).toContain("DEBT-002");
     expect(summary.activeIds).toContain("DEBT-003");
     expect(summary.activeIds).toContain("DEBT-005");
+    expect(summary.activeIds).not.toContain("DEBT-002");
     expect(summary.activeIds).not.toContain("DEBT-004");
     expect(summary.activeIds).not.toContain("DEBT-006");
-    expect(summary.implemented).toBe(2);
+    expect(summary.implemented).toBe(3);
   });
 
   test("registers a read-only system tool for operational debt visibility", async () => {
