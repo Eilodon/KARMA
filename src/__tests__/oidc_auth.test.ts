@@ -25,6 +25,7 @@ vi.mock("../config/env.js", () => ({
     MCP_JWKS_URI: "https://idp.example.com/.well-known/jwks.json",
     MCP_JWT_ISSUER: "https://idp.example.com",
     MCP_JWT_AUDIENCE: "karma-api",
+    MCP_JWT_MAX_AGE_SECONDS: 3600,
     MCP_TENANT_ID: "tenant_test",
     MCP_TRUST_IDENTITY_HEADERS: false,
     MCP_API_KEY: undefined,
@@ -107,7 +108,7 @@ describe("oidc_jwks authentication", () => {
       2,
       "token-2",
       JWKS_HANDLE,
-      { issuer: "https://idp.example.com", audience: "karma-api" },
+      { issuer: "https://idp.example.com", audience: "karma-api", maxTokenAge: "3600s" },
     );
   });
 
@@ -126,6 +127,7 @@ describe("oidc_jwks authentication", () => {
       {
         issuer: "https://idp.example.com",
         audience: "karma-api",
+        maxTokenAge: "3600s",
       },
     );
   });

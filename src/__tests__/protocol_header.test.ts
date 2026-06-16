@@ -160,7 +160,20 @@ describe("protocolHeaderValidation – rc2026 final mode", () => {
   });
 
   test("legacy/compat protocol modes are hard-disabled in this branch", async () => {
-    await expect(importMiddlewareWithMode("compat")).rejects.toThrow(/process.exit/);
-    await expect(importMiddlewareWithMode("legacy")).rejects.toThrow(/process.exit/);
+    // The middleware no longer reads the protocol mode; legacy/compat are hard-rejected at
+    // config load (MCP_PROTOCOL_MODE is a z.literal("rc2026") in env.ts). Assert the guard there.
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit:1");
+    }) as never);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const importEnvWithMode = async (mode: string) => {
+      vi.resetModules();
+      vi.stubEnv("MCP_PROTOCOL_MODE", mode);
+      return import("../config/env.js");
+    };
+    await expect(importEnvWithMode("compat")).rejects.toThrow(/process\.exit/);
+    await expect(importEnvWithMode("legacy")).rejects.toThrow(/process\.exit/);
+    exit.mockRestore();
+    vi.unstubAllEnvs();
   });
 });

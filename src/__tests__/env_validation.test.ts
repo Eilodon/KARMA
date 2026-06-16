@@ -37,6 +37,7 @@ describe("env validation", () => {
       STORAGE_DRIVER: "redis",
       REDIS_URL: "redis://localhost:6379",
       MCP_ENCRYPTION_KEY: "x".repeat(32),
+      MCP_IDEMPOTENCY_SECRET: "x".repeat(32),
       MCP_IDEMPOTENCY_RESULT_TTL_SECONDS: "604800",
     });
 
@@ -93,6 +94,7 @@ describe("env validation", () => {
       STORAGE_DRIVER: "redis",
       REDIS_URL: "redis://localhost:6379",
       MCP_ENCRYPTION_KEY: "x".repeat(32),
+      MCP_IDEMPOTENCY_SECRET: "x".repeat(32),
     });
 
     expect(mod.ENV.MCP_IDEMPOTENCY_RESULT_TTL_SECONDS).toBe(604800);
@@ -417,6 +419,7 @@ describe("env validation", () => {
       MCP_JWT_ISSUER: "https://idp.example.com",
       MCP_JWT_AUDIENCE: "karma-api",
       MCP_RESOURCE_URI: "https://api.example.com/mcp",
+      MCP_IDEMPOTENCY_SECRET: "x".repeat(32),
       ENABLE_RATE_LIMIT: "true",
       ENABLE_QUOTA: "true",
       ALLOWED_ORIGINS: "https://app.example.com",
@@ -442,6 +445,7 @@ describe("env validation", () => {
       MCP_JWT_ISSUER: "https://idp.example.com",
       MCP_JWT_AUDIENCE: "karma-api",
       MCP_RESOURCE_URI: "https://api.example.com/mcp",
+      MCP_IDEMPOTENCY_SECRET: "x".repeat(32),
       MCP_ALLOW_UNLIMITED_HTTP: "true",
       ALLOWED_ORIGINS: "https://app.example.com",
       ALLOWED_HOSTS: "app.example.com",

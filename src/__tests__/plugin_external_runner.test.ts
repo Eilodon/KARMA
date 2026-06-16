@@ -360,7 +360,12 @@ console.log("dist-valid-ok");
     expect(stdout).toContain("dist-valid-ok");
   }, 20_000);
 
-  test("compiled permission mode allows plugin reads and blocks fs writes", async () => {
+  // Best-effort feature: some Node builds (e.g. this v20.x) reject "--permission" with
+  // "bad option" even though the version looks new enough. Skip when the runtime binary does
+  // not actually accept the flag — version-based support detection is not sufficient here.
+  test.skipIf(!process.allowedNodeEnvironmentFlags.has("--permission"))(
+    "compiled permission mode allows plugin reads and blocks fs writes",
+    async () => {
     await ensureDistBuild();
     const plugin = await writePlugin("permission.tool.js", String.raw`
 import { readFile, writeFile } from "node:fs/promises";
