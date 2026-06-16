@@ -23,6 +23,7 @@ const STORE_FIELDS = [
   "reputation_score",
   "owner_address",
   "active",
+  "min_reputation_to_invoke",
 ] as const;
 
 /** True for control / zero-width / bidi-override / BOM code points (tab/newline/CR excepted). */
@@ -64,6 +65,7 @@ export interface SkillSearchHit {
   price_per_call_wei: string;
   reputation_score: number;
   owner_address: string;
+  min_reputation_to_invoke: number; // Trust Gate threshold (0 = no gate)
   score: number;
 }
 
@@ -91,6 +93,17 @@ export class BM25SkillIndex {
   /** Add or replace a skill (idempotent — keyed by skill_id). */
   upsert(doc: SkillDocument): void {
     const clean = sanitizeDoc(doc);
+    // Trust Gate (Phase 1): the threshold is app-layer only, so a chain re-hydration
+    // (skillDocFromChain) arrives with it undefined. Only register_skill ever sets it, and a
+    // skill's threshold is fixed at registration, so carry a previously-declared value forward
+    // instead of letting an indexer re-emit reset the gate. (Does not survive process restart —
+    // see plan 2026-06-16-trust-gate-min-reputation, Phase-1 limitation.)
+    if (clean.min_reputation_to_invoke === undefined) {
+      const prior = this.byId.get(clean.id);
+      if (prior?.min_reputation_to_invoke !== undefined) {
+        clean.min_reputation_to_invoke = prior.min_reputation_to_invoke;
+      }
+    }
     if (this.ms.has(clean.id)) this.ms.replace(clean);
     else this.ms.add(clean);
     this.byId.set(clean.id, clean);
@@ -113,6 +126,32 @@ export class BM25SkillIndex {
       if (doc.owner_address.toLowerCase() === target) return doc;
     }
     return null;
+  }
+
+  /** Indexed skill document by id, or null. */
+  getById(skillId: number): SkillDocument | null {
+    return this.byId.get(skillId) ?? null;
+  }
+
+  /**
+   * Trust Gate (Phase 1) requester reputation: the max on-chain reputation across the skills
+   * `ownerAddress` owns, or 0 if it owns none (⇒ blocked by any threshold > 0). Index-derived,
+   * 0 extra RPC. Phase 2 replaces this with a purpose-built on-chain agentReputation.
+   */
+  getReputation(ownerAddress: string): number {
+    const target = ownerAddress.toLowerCase();
+    let max = 0;
+    for (const doc of this.byId.values()) {
+      if (doc.owner_address.toLowerCase() === target && doc.reputation_score > max) {
+        max = doc.reputation_score;
+      }
+    }
+    return max;
+  }
+
+  /** Trust Gate threshold declared for a skill (0 = no gate / unknown to this process). */
+  getThreshold(skillId: number): number {
+    return this.byId.get(skillId)?.min_reputation_to_invoke ?? 0;
   }
 
   size(): number {
@@ -143,6 +182,7 @@ export class BM25SkillIndex {
         price_per_call_wei: row.price_per_call_wei,
         reputation_score: row.reputation_score,
         owner_address: row.owner_address,
+        min_reputation_to_invoke: row.min_reputation_to_invoke ?? 0,
         score: row.score,
       };
     });

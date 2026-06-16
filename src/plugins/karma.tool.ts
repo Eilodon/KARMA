@@ -152,13 +152,17 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
 
   const registerSkill: ToolDefinition = {
     name: "register_skill",
-    description: "Register a callable skill on-chain (name, description, MCP endpoint, price per call in wei) and index it for discovery.",
+    description:
+      "Register a callable skill on-chain (name, description, MCP endpoint, price per call in wei) and index it for discovery. " +
+      "Optionally set minReputationToInvoke — a Trust Gate (Phase 1, app-layer) blocking create_job from requesters below that reputation.",
     inputSchema: {
       agentId: z.string().describe("Keystore agent id that owns/signs for this skill."),
       name: z.string().min(1),
       description: z.string().default(""),
       mcpEndpoint: z.string().default(""),
       pricePerCallWei: WEI.describe("Price per call in wei, as a base-10 string."),
+      minReputationToInvoke: z.number().int().min(0).max(100).default(0)
+        .describe("Trust Gate: min requester reputation (0..100) to invoke this skill. 0 = open. App-layer only (Phase 1)."),
     },
     capabilities: ["network"],
     allowedPhases: [...PHASES],
@@ -172,6 +176,7 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         description: z.string().default(""),
         mcpEndpoint: z.string().default(""),
         pricePerCallWei: WEI,
+        minReputationToInvoke: z.number().int().min(0).max(100).default(0),
       }).parse(args);
       const account = svc.account(a.agentId);
       const { skillId, outcome } = await svc.registerSkill(account, {
@@ -196,11 +201,13 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         reputation_score: 50,
         owner_address: account.address,
         active: true,
+        min_reputation_to_invoke: a.minReputationToInvoke,
       });
       return reply(`[KARMA] registered skill #${skillId} tx=${outcome.hash}`, {
         status: "confirmed",
         skillId,
         txHash: outcome.hash,
+        minReputationToInvoke: a.minReputationToInvoke,
       });
     },
   };
@@ -261,6 +268,28 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
       const skillId = BigInt(a.skillId);
       const skill = await svc.readSkill(skillId);
       if (!skill.active) throw new Error(`[KARMA] skill #${skillId} is inactive`);
+
+      // Trust Gate (Phase 1, app-layer): reject before any escrow if the requester's reputation
+      // is below the owner-declared threshold. Advisory — a direct contract caller bypasses it;
+      // Phase 2 enforces this in createJob on-chain (see plan 2026-06-16-trust-gate-min-reputation).
+      const requiredReputation = svc.getSkillThreshold(skillId);
+      if (requiredReputation > 0) {
+        const requesterReputation = svc.getReputation(requester);
+        if (requesterReputation < requiredReputation) {
+          return reply(
+            `[KARMA] create_job rejected: requester reputation ${requesterReputation} < required ` +
+              `${requiredReputation} for skill #${skillId}`,
+            {
+              status: "rejected",
+              reason: "insufficient_reputation",
+              skillId,
+              requesterReputation,
+              requiredReputation,
+            },
+          );
+        }
+      }
+
       const taskHash = svc.deriveTaskHash(requester, skillId, BigInt(a.idempotencyNonce));
       const existing = await svc.findExistingJob(requester, taskHash);
       if (existing != null) {
@@ -340,7 +369,9 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
 
   const getAgentReputation: ToolDefinition = {
     name: "get_agent_reputation",
-    description: "Read an agent's registered skills with their reputation scores and invocation counts.",
+    description:
+      "Read an agent's registered skills with their reputation scores and invocation counts, plus its " +
+      "aggregate agentReputation (max owned-skill reputation) — the value the Trust Gate checks against.",
     inputSchema: { agentId: z.string().optional(), address: z.string().optional() },
     capabilities: ["network"],
     allowedPhases: [...PHASES],
@@ -363,7 +394,11 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
           };
         }),
       );
-      return reply(`[KARMA] agent ${address} owns ${skills.length} skill(s)`, { address, skills });
+      const agentReputation = svc.getReputation(address);
+      return reply(
+        `[KARMA] agent ${address} owns ${skills.length} skill(s), reputation ${agentReputation}`,
+        { address, agentReputation, skills },
+      );
     },
   };
 

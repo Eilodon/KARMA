@@ -85,4 +85,11 @@ export interface SkillDocument {
   reputation_score: number;
   owner_address: string;
   active: boolean;
+  /**
+   * Trust Gate (Phase 1): minimum requester reputation (0..100) the owner requires to invoke
+   * this skill. App-layer policy only — there is no on-chain field for it yet, so it is absent
+   * on docs hydrated from chain (skillDocFromChain) and carried forward across re-index by
+   * BM25SkillIndex.upsert. Undefined / 0 ⇒ no gate. Phase 2 moves this on-chain.
+   */
+  min_reputation_to_invoke?: number;
 }

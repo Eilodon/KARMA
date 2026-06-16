@@ -31,6 +31,7 @@ const mkSkill = (o: Partial<SkillDocument> & { skill_id: number }): SkillDocumen
   reputation_score: o.reputation_score ?? 50,
   owner_address: o.owner_address ?? "0xowner",
   active: o.active ?? true,
+  min_reputation_to_invoke: o.min_reputation_to_invoke,
 });
 
 describe("P5.1 BM25SkillIndex", () => {
@@ -102,6 +103,36 @@ describe("P5.1 BM25SkillIndex", () => {
     const hit = idx.search("data")[0];
     expect(typeof hit!.price_per_call_wei).toBe("string");
     expect(hit!.price_per_call_wei).toBe("12345678901234567890");
+  });
+
+  // ── Trust Gate (Phase 1) ─────────────────────────────────────
+  it("exposes min_reputation_to_invoke in hits and via getThreshold", () => {
+    idx.upsert(mkSkill({ skill_id: 80, name: "gated oracle", description: "premium", min_reputation_to_invoke: 70 }));
+    expect(idx.search("oracle")[0]?.min_reputation_to_invoke).toBe(70);
+    expect(idx.getThreshold(80)).toBe(70);
+  });
+
+  it("defaults threshold to 0 (no gate) when unset or skill unknown", () => {
+    idx.upsert(mkSkill({ skill_id: 81, name: "open oracle", description: "free" }));
+    expect(idx.search("oracle")[0]?.min_reputation_to_invoke).toBe(0);
+    expect(idx.getThreshold(81)).toBe(0);
+    expect(idx.getThreshold(9999)).toBe(0); // unknown skill
+  });
+
+  it("carries the threshold forward when a chain re-hydration omits it (durability)", () => {
+    // register_skill sets the threshold; the indexer later re-hydrates from chain WITHOUT it.
+    idx.upsert(mkSkill({ skill_id: 82, name: "gated", description: "x", min_reputation_to_invoke: 60 }));
+    idx.upsert(mkSkill({ skill_id: 82, name: "gated", description: "x", reputation_score: 90 })); // no threshold field
+    expect(idx.getThreshold(82)).toBe(60); // preserved, not reset
+    expect(idx.search("gated")[0]?.reputation_score).toBe(90); // other fields still updated
+  });
+
+  it("getReputation returns the max reputation across an owner's skills, else 0", () => {
+    idx.upsert(mkSkill({ skill_id: 90, owner_address: "0xAbC", reputation_score: 55 }));
+    idx.upsert(mkSkill({ skill_id: 91, owner_address: "0xABC", reputation_score: 80 })); // same owner, diff case
+    idx.upsert(mkSkill({ skill_id: 92, owner_address: "0xother", reputation_score: 95 }));
+    expect(idx.getReputation("0xabc")).toBe(80); // case-insensitive, max of 55/80
+    expect(idx.getReputation("0xnobody")).toBe(0); // owns nothing
   });
 
   it("rebuildFromChain paginates until a short page and indexes all", async () => {

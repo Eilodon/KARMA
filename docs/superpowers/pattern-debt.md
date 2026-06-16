@@ -70,3 +70,28 @@ Queried by: kb-query skill
   add a persisted `lastIndexedBlock` checkpoint (own store, driver parity) read as `fromBlock` on boot.
 - **action:** track; address alongside PD-002's integration-test work or first multi-instance deploy.
 
+## PD-005 — Trust Gate is app-layer advisory, not on-chain enforced (Phase 2 deferred)
+- **status:** OPEN (Phase 1 shipped 2026-06-16; plan 2026-06-16-trust-gate-min-reputation)
+- **discovered:** 2026-06-16 while implementing `min_reputation_to_invoke`
+- **evidence:** `create_job` enforces the per-skill reputation threshold in the tool handler
+  (`karma.tool.ts`), reading both the threshold and the requester's reputation from the in-process
+  BM25 index. This is NOT consensus: a caller hitting `createJob` directly on the deployed
+  `AgentSkillRegistry` bypasses the gate entirely. The threshold also lives only in the index
+  (no on-chain field), so it does not survive a process restart (cold-start rebuilds from chain,
+  which carries no threshold) and is invisible to other processes/agents.
+- **root cause:** the deployed contract is immutable (no proxy); a real on-chain gate needs a
+  `Skill.minReputationToInvoke` field + a per-agent `agentReputation` mapping, both of which are
+  storage-layout changes requiring a **redeploy + skill migration**. Also: on a free testnet,
+  reputation is wash-tradeable between colluding addresses, so on-chain enforcement would imply a
+  Sybil-resistance guarantee it can't make without staking/identity. Phase 1's advisory level is
+  the honest assurance until then.
+- **also (Phase-1 metric):** requester reputation = max owned-skill reputation (index-derived).
+  Phase 2 replaces it with a purpose-built on-chain `agentReputation` (base 50, earned on completed
+  jobs where `requester != provider`); thresholds set in Phase 1 may need re-tuning at cutover.
+- **resolution_trigger:** Bundle Phase 2 into the next `AgentSkillRegistry` redeploy — whichever
+  fires first: PD-003 (`jobCount() > 1000` / requester owns > 100 jobs) OR a concrete
+  institutional-skill customer needs consensus-level enforcement OR a staking/identity primitive
+  lands that makes reputation Sybil-costly. Build it alongside PD-003's `jobByTaskHash` change to
+  avoid a second migration; demote the index threshold to a cache of the on-chain value.
+- **action:** track; Phase 2 design is locked in the plan, not built.
+

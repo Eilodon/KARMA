@@ -47,6 +47,8 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
     indexUpsert: vi.fn(),
     indexDiscard: vi.fn(),
     getByOwner: vi.fn(() => null),
+    getSkillThreshold: vi.fn(() => 0), // default: no Trust Gate
+    getReputation: vi.fn(() => 0),
     search: vi.fn(() => [
       {
         skill_id: 7,
@@ -56,6 +58,7 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
         price_per_call_wei: "1000",
         reputation_score: 55,
         owner_address: ALPHA,
+        min_reputation_to_invoke: 0,
         score: 1.23,
       },
     ]),
@@ -163,6 +166,65 @@ describe("P6 KARMA tools", () => {
     expect(hasBigInt(res.structuredContent)).toBe(false);
     // wei must not be dumped raw into the human text
     expect(res.content[0].text).not.toMatch(/1000/);
+  });
+
+  // ── Trust Gate (Phase 1, app-layer) ──────────────────────────
+  it("register_skill: passes minReputationToInvoke into the index doc", async () => {
+    await call(tool(tools, "register_skill"), {
+      agentId: "agent-alpha",
+      name: "premium-search",
+      description: "institutional",
+      mcpEndpoint: "http://localhost/mcp",
+      pricePerCallWei: "1000",
+      minReputationToInvoke: 70,
+    });
+    expect((svc.indexUpsert as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
+      skill_id: 7,
+      min_reputation_to_invoke: 70,
+    });
+  });
+
+  it("create_job: Trust Gate rejects a requester below the skill threshold (no escrow)", async () => {
+    svc = fakeService({
+      getSkillThreshold: vi.fn(() => 70),
+      getReputation: vi.fn(() => 55),
+    });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
+    expect(res.structuredContent).toMatchObject({
+      status: "rejected",
+      reason: "insufficient_reputation",
+      skillId: "7",
+      requesterReputation: 55,
+      requiredReputation: 70,
+    });
+    expect(svc.createJob).not.toHaveBeenCalled();
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it("create_job: Trust Gate allows a requester at/above the threshold", async () => {
+    svc = fakeService({
+      getSkillThreshold: vi.fn(() => 50),
+      getReputation: vi.fn(() => 55),
+    });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
+    expect(svc.createJob).toHaveBeenCalledTimes(1);
+    expect((res.structuredContent as { jobId: string }).jobId).toBe("4");
+  });
+
+  it("create_job: threshold 0 (default) skips the gate entirely", async () => {
+    // default fake: getSkillThreshold → 0; getReputation must never be consulted
+    await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
+    expect(svc.getReputation).not.toHaveBeenCalled();
+    expect(svc.createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("get_agent_reputation: surfaces the aggregate agentReputation the gate checks", async () => {
+    svc = fakeService({ getReputation: vi.fn(() => 65) });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "get_agent_reputation"), { agentId: "agent-alpha" });
+    expect((res.structuredContent as { agentReputation: number }).agentReputation).toBe(65);
   });
 
   it("deliver_result + complete_job: return tx hash and never leak bigint", async () => {

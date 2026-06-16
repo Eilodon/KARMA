@@ -77,6 +77,10 @@ export interface KarmaService {
   search(query: string, opts: SkillSearchOptions): SkillSearchHit[];
   /** First indexed skill doc for an owner (reputation source, 0 RPC), or null. */
   getByOwner(addr: Address): SkillDocument | null;
+  /** Trust Gate (Phase 1): threshold declared for a skill, 0 = no gate. Index-derived (0 RPC). */
+  getSkillThreshold(skillId: bigint): number;
+  /** Trust Gate (Phase 1): an address's requester reputation (max owned-skill rep, else 0). 0 RPC. */
+  getReputation(addr: Address): number;
 }
 
 function read<T>(functionName: string, args: readonly unknown[]): Promise<T> {
@@ -178,4 +182,6 @@ export const realKarmaService: KarmaService = {
   indexDiscard: (skillId) => skillIndex.discard(skillId),
   search: (query, opts) => skillIndex.search(query, opts),
   getByOwner: (addr) => skillIndex.getByOwner(addr),
+  getSkillThreshold: (skillId) => skillIndex.getThreshold(Number(skillId)),
+  getReputation: (addr) => skillIndex.getReputation(addr),
 };
