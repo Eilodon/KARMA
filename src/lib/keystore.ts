@@ -8,7 +8,15 @@ import {
 import { readFile } from "node:fs/promises";
 import { keccak256, type Address } from "viem";
 import { privateKeyToAccount, nonceManager } from "viem/accounts";
+import { ENV } from "../config/env.js";
 import type { AgentIdentity, CryptoV3, KeystoreFileV3 } from "./types.js";
+
+/**
+ * Tenant an agent binds to when its keystore entry omits `tenant`. Fail-closed: an unmarked agent
+ * is owned by exactly this tenant, NOT "any tenant". Single-operator stdio keeps working (its
+ * request context is this same default); a different multi-tenant caller is denied (STRIDE-S).
+ */
+const DEFAULT_AGENT_TENANT = ENV.KARMA_DEFAULT_AGENT_TENANT ?? ENV.MCP_TENANT_ID;
 
 // Explicit wrapper (promisify drops the options overload in the type system).
 function scrypt(password: Buffer, salt: Buffer, keylen: number, options: ScryptOptions): Promise<Buffer> {
@@ -46,7 +54,12 @@ export class KeystoreManager {
     for (const entry of file.agents) {
       const pk = await this.decryptV3(entry.crypto, password, entry.agentId);
       const account = privateKeyToAccount(pk, { nonceManager });
-      this.identities.set(entry.agentId, { agentId: entry.agentId, address: account.address, account });
+      this.identities.set(entry.agentId, {
+        agentId: entry.agentId,
+        address: account.address,
+        account,
+        tenant: entry.tenant ?? DEFAULT_AGENT_TENANT,
+      });
     }
   }
 
@@ -101,6 +114,19 @@ export class KeystoreManager {
     const id = this.identities.get(agentId);
     if (!id) throw new Error(`[KARMA] Agent not found in keystore: ${agentId}`);
     return id;
+  }
+
+  /**
+   * Authz gate (STRIDE-S): the calling tenant must own this agent. The message is intentionally
+   * generic — it never names the owning tenant — to avoid cross-tenant reconnaissance. Unknown
+   * agents fail with "Agent not found" (checked first) so a probe can't distinguish
+   * "wrong tenant" from "no such agent" by message.
+   */
+  assertOwnedBy(agentId: string, tenantId: string): void {
+    const id = this.requireIdentity(agentId);
+    if (id.tenant !== tenantId) {
+      throw new Error(`[KARMA] agent '${agentId}' is not accessible to this tenant`);
+    }
   }
 }
 

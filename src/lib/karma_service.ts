@@ -48,8 +48,10 @@ export interface OnchainJob {
 }
 
 export interface KarmaService {
-  account(agentId: string): Account;
-  addressOf(agentId: string): Address;
+  /** Resolve the signing account for an agent, asserting the calling tenant owns it (STRIDE-S). */
+  account(agentId: string, tenantId: string): Account;
+  /** Resolve an agent's address, asserting the calling tenant owns it (STRIDE-S). */
+  addressOf(agentId: string, tenantId: string): Address;
   registerSkill(
     account: Account,
     p: { name: string; description: string; mcpEndpoint: string; pricePerCall: bigint },
@@ -77,6 +79,10 @@ export interface KarmaService {
   search(query: string, opts: SkillSearchOptions): SkillSearchHit[];
   /** First indexed skill doc for an owner (reputation source, 0 RPC), or null. */
   getByOwner(addr: Address): SkillDocument | null;
+  /** Trust Gate (Phase 1): threshold declared for a skill, 0 = no gate. Index-derived (0 RPC). */
+  getSkillThreshold(skillId: bigint): number;
+  /** Trust Gate (Phase 1): an address's requester reputation (max owned-skill rep, else 0). 0 RPC. */
+  getReputation(addr: Address): number;
 }
 
 function read<T>(functionName: string, args: readonly unknown[]): Promise<T> {
@@ -104,8 +110,14 @@ function extractId(outcome: WriteOutcome, eventName: string, argName: string): b
 }
 
 export const realKarmaService: KarmaService = {
-  account: (agentId) => keystoreManager.getAccount(agentId),
-  addressOf: (agentId) => keystoreManager.getAddress(agentId),
+  account: (agentId, tenantId) => {
+    keystoreManager.assertOwnedBy(agentId, tenantId);
+    return keystoreManager.getAccount(agentId);
+  },
+  addressOf: (agentId, tenantId) => {
+    keystoreManager.assertOwnedBy(agentId, tenantId);
+    return keystoreManager.getAddress(agentId);
+  },
 
   async registerSkill(account, p) {
     const outcome = await writeContractBounded(account, {
@@ -178,4 +190,6 @@ export const realKarmaService: KarmaService = {
   indexDiscard: (skillId) => skillIndex.discard(skillId),
   search: (query, opts) => skillIndex.search(query, opts),
   getByOwner: (addr) => skillIndex.getByOwner(addr),
+  getSkillThreshold: (skillId) => skillIndex.getThreshold(Number(skillId)),
+  getReputation: (addr) => skillIndex.getReputation(addr),
 };

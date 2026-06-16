@@ -133,6 +133,29 @@ function redactSensitiveText(text: string, violations: Set<string>): string {
   return redactPromptInjectionMarkers(redacted, violations);
 }
 
+// Error-path ONLY: a bare 0x+64hex is private-key / 32-byte-secret shaped. This MUST NOT be added
+// to scanToolOutput — legitimate tool output (result_hash, taskHash) is the same shape and would be
+// destroyed. KARMA decrypts private keys in-process, so a viem/keystore error could stringify key
+// material; over-redacting 32-byte hex in error strings is the safe trade (audit-design abductive-2).
+const HEX32_RE = /0x[0-9a-fA-F]{64}/g;
+
+/**
+ * Sanitize a free-text error message before it leaves KARMA for the client. Runs the full
+ * credential/PII firewall, strips paths + connection strings, redacts private-key-shaped hex, and
+ * caps length. Used by the execution pipeline's makeToolErrorResult + toClientError chokepoint.
+ */
+export function redactErrorText(text: string): string {
+  const violations = new Set<string>();
+  let safe = redactSensitiveText(text, violations); // cards/credentials/SSN/strict-PII/prompt-injection
+  safe = safe
+    .replace(/rediss?:\/\/[^\s]+/gi, "[redis]")
+    .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[db]")
+    .replace(/\/[\w/.-]+/g, "[path]")
+    .replace(/[A-Z]:\\[\w\\.-]+/gi, "[path]")
+    .replace(HEX32_RE, "[REDACTED:HEX32]");
+  return safe.substring(0, 256);
+}
+
 function redactJsonValue(
   value: unknown,
   violations: Set<string>,

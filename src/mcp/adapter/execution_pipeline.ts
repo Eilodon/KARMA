@@ -8,7 +8,7 @@ import { globalIdempotencyManager } from "../../middlewares/idempotency.js";
 import { globalGuardrails } from "../../middlewares/guardrails.js";
 import { globalCredentialVault } from "../../middlewares/vault.js";
 import { globalExecutionLockManager } from "../../middlewares/execution_lock.js";
-import { scanToolOutput } from "../../middlewares/output_firewall.js";
+import { scanToolOutput, redactErrorText } from "../../middlewares/output_firewall.js";
 import { sanitizeJsonValue } from "../../security/sanitize.js";
 import { assertToolPolicy } from "../../security/policy.js";
 import { telemetry } from "../../telemetry/factory.js";
@@ -240,16 +240,29 @@ function isTransientError(error: unknown): boolean {
 }
 
 function makeToolErrorResult(prefix: string, error: unknown): ToolResult {
-  // MISS-1 fix: strip internal paths and connection strings before returning to caller.
-  // Full error detail is already captured by the telemetry log at the call site.
+  // MISS-1 + A2: route through the canonical error firewall (credentials/PII/paths/connection
+  // strings/private-key hex), not just path stripping. Full error detail is captured server-side
+  // by the telemetry log at the call site.
   const raw = error instanceof Error ? error.message : String(error);
-  const safe = raw
-    .replace(/\/[\w/.-]+/g, "[path]")
-    .replace(/[A-Z]:\\[\w\\.-]+/gi, "[path]")
-    .replace(/rediss?:\/\/[^\s]+/gi, "[redis]")
-    .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[db]")
-    .substring(0, 256);
-  return { content: [{ type: "text", text: `${prefix}: ${safe}` }] };
+  return { content: [{ type: "text", text: `${prefix}: ${redactErrorText(raw)}` }] };
+}
+
+/**
+ * A2 chokepoint: sanitize an error before it leaves KARMA for the MCP client. The MCP SDK forwards
+ * a thrown error's `.message` verbatim, so every throw on a tool path must pass through here. The
+ * full, unredacted error stays server-side in telemetry; only the client-facing message is redacted.
+ * Preserves `.name` + a JSON-RPC `.code` so protocol semantics are unchanged; drops stack/cause.
+ */
+export function toClientError(error: unknown): Error {
+  if (error instanceof ElicitationRequiredException) return error;
+  const raw = error instanceof Error ? error.message : String(error);
+  const safe = new Error(redactErrorText(raw));
+  if (error instanceof Error) {
+    safe.name = error.name;
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "number" || typeof code === "string") (safe as { code?: unknown }).code = code;
+  }
+  return safe;
 }
 
 async function executeTool<T>(
@@ -357,6 +370,8 @@ export function registerTools<T = Record<string, unknown>>(
       server,
       tool,
       async (args: unknown, extra: { signal?: AbortSignal; mcpReq?: { id?: unknown; signal?: AbortSignal; _meta?: Record<string, unknown> } } = {}) => {
+        // A2 chokepoint: any error thrown on a tool path is sanitized before it reaches the client.
+        try {
         const ctx = getRequestContext();
         const tenantId = ctx.tenantId;
         const owner = taskOwner(ctx);
@@ -610,7 +625,9 @@ export function registerTools<T = Record<string, unknown>>(
           throw new Error(`[KARMA] Tool '${tool.name}' requires client support for io.modelcontextprotocol/tasks.`);
         }
 
-        return globalExecutionLockManager.withTenantLock(tenantId, async (lockSignal) => {
+        // `return await` (not bare `return`) so a rejection from the locked execution is caught by
+        // the A2 chokepoint below rather than escaping the try unsanitized.
+        return await globalExecutionLockManager.withTenantLock(tenantId, async (lockSignal) => {
           const signals = [requestSignal, lockSignal].filter(Boolean) as AbortSignal[];
           const combinedSignal = signals.length > 0 ? (signals.length === 1 ? signals[0] : AbortSignal.any(signals)) : undefined;
           try {
@@ -641,6 +658,9 @@ export function registerTools<T = Record<string, unknown>>(
             throw error;
           }
         });
+        } catch (error) {
+          throw toClientError(error);
+        }
       }
     );
   }

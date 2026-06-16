@@ -4,6 +4,7 @@ import { createKarmaTools } from "../plugins/karma.tool.js";
 import type { KarmaService, OnchainSkill } from "../lib/karma_service.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
 import { markTrustedRuntime } from "../core/runtime_identity.js";
+import { withRequestContext } from "../security/context.js";
 
 const ALPHA = "0x857c2F11E9EDDdC7DDc03d035B0998De3c7677ec" as const;
 const TXH = "0xabc123" as const;
@@ -47,6 +48,8 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
     indexUpsert: vi.fn(),
     indexDiscard: vi.fn(),
     getByOwner: vi.fn(() => null),
+    getSkillThreshold: vi.fn(() => 0), // default: no Trust Gate
+    getReputation: vi.fn(() => 0),
     search: vi.fn(() => [
       {
         skill_id: 7,
@@ -56,6 +59,7 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
         price_per_call_wei: "1000",
         reputation_score: 55,
         owner_address: ALPHA,
+        min_reputation_to_invoke: 0,
         score: 1.23,
       },
     ]),
@@ -163,6 +167,65 @@ describe("P6 KARMA tools", () => {
     expect(hasBigInt(res.structuredContent)).toBe(false);
     // wei must not be dumped raw into the human text
     expect(res.content[0].text).not.toMatch(/1000/);
+  });
+
+  // ── Trust Gate (Phase 1, app-layer) ──────────────────────────
+  it("register_skill: passes minReputationToInvoke into the index doc", async () => {
+    await call(tool(tools, "register_skill"), {
+      agentId: "agent-alpha",
+      name: "premium-search",
+      description: "institutional",
+      mcpEndpoint: "http://localhost/mcp",
+      pricePerCallWei: "1000",
+      minReputationToInvoke: 70,
+    });
+    expect((svc.indexUpsert as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
+      skill_id: 7,
+      min_reputation_to_invoke: 70,
+    });
+  });
+
+  it("create_job: Trust Gate rejects a requester below the skill threshold (no escrow)", async () => {
+    svc = fakeService({
+      getSkillThreshold: vi.fn(() => 70),
+      getReputation: vi.fn(() => 55),
+    });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
+    expect(res.structuredContent).toMatchObject({
+      status: "rejected",
+      reason: "insufficient_reputation",
+      skillId: "7",
+      requesterReputation: 55,
+      requiredReputation: 70,
+    });
+    expect(svc.createJob).not.toHaveBeenCalled();
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it("create_job: Trust Gate allows a requester at/above the threshold", async () => {
+    svc = fakeService({
+      getSkillThreshold: vi.fn(() => 50),
+      getReputation: vi.fn(() => 55),
+    });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
+    expect(svc.createJob).toHaveBeenCalledTimes(1);
+    expect((res.structuredContent as { jobId: string }).jobId).toBe("4");
+  });
+
+  it("create_job: threshold 0 (default) skips the gate entirely", async () => {
+    // default fake: getSkillThreshold → 0; getReputation must never be consulted
+    await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
+    expect(svc.getReputation).not.toHaveBeenCalled();
+    expect(svc.createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("get_agent_reputation: surfaces the aggregate agentReputation the gate checks", async () => {
+    svc = fakeService({ getReputation: vi.fn(() => 65) });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "get_agent_reputation"), { agentId: "agent-alpha" });
+    expect((res.structuredContent as { agentReputation: number }).agentReputation).toBe(65);
   });
 
   it("deliver_result + complete_job: return tx hash and never leak bigint", async () => {
@@ -280,5 +343,85 @@ describe("P6 KARMA tools", () => {
     expect(sc.status).toBe("pending");
     expect(sc.txHash).toBe(TXH);
     expect(sc.amountWei).toBeUndefined();
+  });
+});
+
+describe("A1 tenant isolation (STRIDE-S)", () => {
+  beforeEach(() => markTrustedRuntime());
+
+  it("threads the caller's tenantId into svc.account (default ctx = tenant_local)", async () => {
+    const svc = fakeService();
+    const tools = createKarmaTools(svc);
+    await call(tool(tools, "withdraw_balance"), { agentId: "agent-alpha" });
+    expect(svc.account).toHaveBeenCalledWith("agent-alpha", "tenant_local");
+  });
+
+  it("threads tenantId into addressOf for read tools using agentId", async () => {
+    const svc = fakeService();
+    const tools = createKarmaTools(svc);
+    await call(tool(tools, "get_pending_balance"), { agentId: "agent-alpha" });
+    expect(svc.addressOf).toHaveBeenCalledWith("agent-alpha", "tenant_local");
+  });
+
+  it("a foreign tenant cannot drive another tenant's agent (no on-chain write)", async () => {
+    const svc = fakeService({
+      account: vi.fn((_agentId: string, tenantId: string) => {
+        if (tenantId !== "tenant_local") {
+          throw new Error("[KARMA] agent 'agent-alpha' is not accessible to this tenant");
+        }
+        return { address: ALPHA } as never;
+      }),
+    });
+    const tools = createKarmaTools(svc);
+    await expect(
+      withRequestContext(
+        { tenantId: "evil", userId: "u", clientId: "c", scopes: [], requestId: "r", authType: "gateway" },
+        () => call(tool(tools, "create_job"), { agentId: "agent-alpha", skillId: "7", idempotencyNonce: 1 }),
+      ),
+    ).rejects.toThrow(/not accessible to this tenant/i);
+    expect(svc.createJob).not.toHaveBeenCalled();
+  });
+
+  it("the raw-address read path needs no tenant (on-chain public data)", async () => {
+    const svc = fakeService();
+    const tools = createKarmaTools(svc);
+    await call(tool(tools, "get_pending_balance"), { address: ALPHA });
+    expect(svc.addressOf).not.toHaveBeenCalled();
+  });
+});
+
+describe("A3 social-graph fan-out cap (DoS)", () => {
+  beforeEach(() => markTrustedRuntime());
+
+  it("caps hydration at KARMA_SOCIAL_GRAPH_MAX_JOBS and flags truncated", async () => {
+    const ids = Array.from({ length: 600 }, (_, i) => BigInt(i + 1));
+    const svc = fakeService({
+      getProviderJobs: vi.fn(async () => ids),
+      getRequesterJobs: vi.fn(async () => []),
+      readJob: vi.fn(async () => ({
+        requester: ALPHA, provider: ALPHA, skillId: 1n, taskHash: `0x${"00".repeat(32)}`,
+        escrowAmount: 0n, deadline: 0n, status: 0, resultHash: `0x${"00".repeat(32)}`,
+        createdAt: 1n, completedAt: 0n,
+      }) as never),
+    });
+    const tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "query_social_graph"), { address: ALPHA, format: "full" });
+    const sc = res.structuredContent as { summary: { truncated: boolean; total_unique_jobs: number } };
+    expect(svc.readJob).toHaveBeenCalledTimes(500);
+    expect(sc.summary.truncated).toBe(true);
+    expect(sc.summary.total_unique_jobs).toBe(600);
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it("does not truncate below the cap (full hydration, flag false)", async () => {
+    const svc = fakeService({
+      getProviderJobs: vi.fn(async () => [4n, 9n]),
+      getRequesterJobs: vi.fn(async () => [2n]),
+    });
+    const tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "query_social_graph"), { address: ALPHA, format: "full" });
+    const sc = res.structuredContent as { summary: { truncated: boolean; total_unique_jobs: number } };
+    expect(sc.summary.truncated).toBe(false);
+    expect(sc.summary.total_unique_jobs).toBe(3);
   });
 });

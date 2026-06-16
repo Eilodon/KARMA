@@ -42,6 +42,12 @@ const EnvSchema = z.object({
   MCP_PROJECT_ID: z.string().default("karma_default"),
   MCP_TENANT_ID: z.string().default("tenant_local"),
   MCP_TRUST_IDENTITY_HEADERS: z.boolean().default(false),
+  // KARMA STRIDE-S (A1): tenant a keystore agent binds to when its entry omits `tenant`.
+  // Unset ⇒ falls back to MCP_TENANT_ID. Set this to the live tenant id in api-key/gateway
+  // deployments (where the request tenant is NOT MCP_TENANT_ID) to keep a flat keystore usable.
+  KARMA_DEFAULT_AGENT_TENANT: z.string().optional(),
+  // KARMA DoS hardening (A3): max distinct job edges query_social_graph format:"full" hydrates.
+  KARMA_SOCIAL_GRAPH_MAX_JOBS: z.number().int().min(1).max(100000).default(500),
 
   MCP_PLUGIN_ALLOWLIST: z.string().default("system.tool.js,system.tool.ts"),
   MCP_PLUGIN_AUTO_DISCOVERY: z.boolean().default(false),
@@ -167,6 +173,8 @@ function loadEnv() {
     MCP_PROJECT_ID: process.env.MCP_PROJECT_ID,
     MCP_TENANT_ID: process.env.MCP_TENANT_ID,
     MCP_TRUST_IDENTITY_HEADERS: parseSafeBoolean(process.env.MCP_TRUST_IDENTITY_HEADERS),
+    KARMA_DEFAULT_AGENT_TENANT: process.env.KARMA_DEFAULT_AGENT_TENANT,
+    KARMA_SOCIAL_GRAPH_MAX_JOBS: parseIntEnv(process.env.KARMA_SOCIAL_GRAPH_MAX_JOBS),
     MCP_PLUGIN_ALLOWLIST: process.env.MCP_PLUGIN_ALLOWLIST,
     MCP_PLUGIN_AUTO_DISCOVERY: parseSafeBoolean(process.env.MCP_PLUGIN_AUTO_DISCOVERY),
     MCP_ALLOW_UNSAFE_PLUGIN_AUTO_DISCOVERY: parseSafeBoolean(process.env.MCP_ALLOW_UNSAFE_PLUGIN_AUTO_DISCOVERY),

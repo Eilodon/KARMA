@@ -5,7 +5,7 @@
 The system has three layers:
 
 - **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
-- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Eight MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm), reputation reading, and social-graph queries. Runs in-process as a trusted built-in; private keys never leave the process.
+- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Ten MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process.
 - **Layer 2 — `AgentSkillRegistry` contract:** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, and withdrawals. Verified live at [`0x75ff9822…753f57`](https://atlantic.pharosscan.xyz/address/0x75ff9822f9da947881247cecba74dccdea753f57).
 
 > Package: `karma`
@@ -118,12 +118,12 @@ Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried 
 ### Layer 1 — KARMA skill economy tools
 
 - **`karma_health`** — In-process runtime canary; confirms RPC and contract env presence and reports skill-indexer state (`indexer`: `watching`, `lastIndexedBlock`, `lastEventAt`, or `{ started: false }`).
-- **`register_skill`** — Broadcast `registerSkill(name, description, endpoint, price)` on-chain and upsert into the BM25 index.
-- **`discover_skills`** — BM25 free-text search (prefix + fuzzy) with reputation-boost ranking, `maxPriceWei` and `minReputation` filters.
-- **`create_job`** — Idempotent escrow: derives `taskHash(requester, skillId, nonce)`, checks existing before broadcast. Returns `exists` on replay, `confirmed`/`pending` on new.
+- **`register_skill`** — Broadcast `registerSkill(name, description, endpoint, price)` on-chain and upsert into the BM25 index. Optional `minReputationToInvoke` (0..100) sets a **Trust Gate** (Phase 1, app-layer advisory policy enforced by `create_job`).
+- **`discover_skills`** — BM25 free-text search (prefix + fuzzy) with reputation-boost ranking, `maxPriceWei` and `minReputation` filters. Hits expose each skill's `min_reputation_to_invoke`.
+- **`create_job`** — Idempotent escrow: derives `taskHash(requester, skillId, nonce)`, checks existing before broadcast. Returns `exists` on replay, `confirmed`/`pending` on new. **Trust Gate:** if the skill's `min_reputation_to_invoke` > 0 and the requester's reputation is below it, replies `rejected` (`reason: "insufficient_reputation"`) before any escrow.
 - **`deliver_result`** — Provider submits `resultHash` (bytes32) for an open job.
 - **`complete_job`** — Requester confirms; releases escrow to provider's withdrawable balance and bumps reputation.
-- **`get_agent_reputation`** — Read an agent's skills with reputation scores and invocation counts.
+- **`get_agent_reputation`** — Read an agent's skills with reputation scores and invocation counts, plus `agentReputation` (max owned-skill reputation) — the value the Trust Gate checks against.
 - **`query_social_graph`** — Job edges for an agent (as provider and as requester); `format: "full"` hydrates each edge into job details plus a summary.
 - **`get_pending_balance`** — Read an agent's withdrawable balance (`pendingWithdrawals`) in wei and formatted PHRS; accepts an `agentId` or raw `address`.
 - **`withdraw_balance`** — Pull the agent's full released-escrow balance to its wallet, closing the economic loop entirely inside MCP. Returns `amountWei` decoded from the `Withdrawn` event.
@@ -315,7 +315,7 @@ Important implementation files:
 | `src/lib/keystore.ts` | `KeystoreManager` — Web3 v3 scrypt/aes-128-ctr decrypt; `encryptPrivateKeyV3` for keystore setup. |
 | `src/lib/serialize.ts` | `jsonSafe()` — recursive BigInt → decimal string (D-6). |
 | `src/lib/types.ts` | `AgentIdentity`, `CryptoV3`, `KeystoreFileV3`, `SkillDocument`. |
-| `src/plugins/karma.tool.ts` | 8 KARMA tools; trusted in-process built-in; `assertInProcess()` fail-fast. |
+| `src/plugins/karma.tool.ts` | 10 KARMA tools; trusted in-process built-in; `assertInProcess()` fail-fast. |
 | `src/plugins/system.tool.ts` | Built-in: `karma_ping`, `karma_pattern_debt`, `karma_test_long_task`. |
 | `src/mcp/adapter/execution_pipeline.ts` | Tool call governance, native task execution, state save, telemetry. |
 | `src/core/task_store.ts` | Durable task store with local/memory/Redis and atomic input consume. |
@@ -393,12 +393,12 @@ Agent A (provider)                        Agent B (requester)
 | Tool | Type | Description |
 | --- | --- | --- |
 | `karma_health` | read-only | Canary: confirms in-process mode and presence of `PHAROS_RPC_URL` / `PHAROS_CONTRACT_ADDRESS`; reports skill-indexer health (`indexer.watching` / `lastIndexedBlock` / `lastEventAt`, or `{ started: false }`). |
-| `register_skill` | write | Broadcast `registerSkill` on-chain and upsert into BM25 index. Returns `pending` if receipt times out. |
-| `discover_skills` | read-only | BM25 free-text search (prefix + fuzzy 0.2, name boost ×2), reputation-boosted ranking, optional `maxPriceWei` and `minReputation` filters. |
-| `create_job` | write (idempotent) | Derive `taskHash(requester, skillId, idempotencyNonce)`, check existing before broadcast. Reply `exists` on replay. |
+| `register_skill` | write | Broadcast `registerSkill` on-chain and upsert into BM25 index. Returns `pending` if receipt times out. Optional `minReputationToInvoke` (0..100) sets the Trust Gate threshold. |
+| `discover_skills` | read-only | BM25 free-text search (prefix + fuzzy 0.2, name boost ×2), reputation-boosted ranking, optional `maxPriceWei` and `minReputation` filters. Hits include `min_reputation_to_invoke`. |
+| `create_job` | write (idempotent) | Derive `taskHash(requester, skillId, idempotencyNonce)`, check existing before broadcast. Reply `exists` on replay. **Trust Gate:** replies `rejected` if requester reputation < the skill's `min_reputation_to_invoke`, before any escrow. |
 | `deliver_result` | write | Provider submits `resultHash` (0x + 64 hex) for an open job. |
 | `complete_job` | write | Requester confirms; escrow credited to provider's withdrawable balance; reputation +5. |
-| `get_agent_reputation` | read-only | Agent's skills with `reputation`, `totalInvocations`, `active`. |
+| `get_agent_reputation` | read-only | Agent's skills with `reputation`, `totalInvocations`, `active`, plus aggregate `agentReputation` (Trust Gate input). |
 | `query_social_graph` | read-only | Job edges for an agent: `asProvider` and `asRequester` job-ID arrays (`format: "full"` → hydrated details + summary). |
 | `get_pending_balance` | read-only | Agent's withdrawable balance (`pendingWithdrawals`) as `withdrawableWei` + `formattedPHRS`; accepts `agentId` or `address`. |
 | `withdraw_balance` | write | Pull full released escrow to the agent's wallet; `amountWei` decoded from the `Withdrawn` event. Reverts on-chain if nothing to withdraw. |
@@ -415,7 +415,7 @@ MCP_SAFE_MODE=false
 
 `MCP_PLUGIN_ISOLATION_MODE=policy` ensures `karma.tool.ts` is treated as a trusted built-in and never dispatched to the external runner. `MCP_SAFE_MODE=false` is required because `karma.tool.ts` declares the `network` capability, which safe mode blocks.
 
-`assertInProcess()` inside every tool handler will throw immediately if the tool is somehow invoked in a worker environment (`KARMA_PLUGIN_WORKER=1`).
+`assertInProcess()` inside every tool handler will throw immediately if the plugin is not loaded into the trusted runtime (`isTrustedRuntime()`), or if it detects the legacy worker environment (`KARMA_PLUGIN_WORKER=1`).
 
 ### BigInt safety (D-6)
 
@@ -995,7 +995,7 @@ Plugin files live in `src/plugins/`. Accepted filenames: `*.tool.ts` and `*.tool
 - `keystoreManager` is a module singleton loaded once at startup; the external runner reinitializes it empty every call.
 - `skillIndex` is a module singleton; the external runner loses all indexed documents.
 - `process.env.PHAROS_*` and `process.env.KEYSTORE_*` are stripped by `workerEnv()` in the external runner.
-- `assertInProcess()` in every handler throws if `KARMA_PLUGIN_WORKER=1` (the worker bootstrap sets this).
+- `assertInProcess()` in every handler throws if the runtime is not explicitly trusted (`!isTrustedRuntime()`) or if it detects the legacy worker environment (`KARMA_PLUGIN_WORKER=1`).
 
 Required configuration:
 

@@ -8,6 +8,8 @@ export interface AgentIdentity {
   agentId: string;
   address: Address;
   account: ManagedAccount;
+  /** Owning tenant, resolved at load: entry.tenant ?? default agent tenant (fail-closed binding). */
+  tenant: string;
 }
 
 /** Web3 Secret Storage v3 crypto block (scrypt KDF variant). */
@@ -33,6 +35,8 @@ export interface KeystoreFileV3 {
   agents: Array<{
     agentId: string;
     address?: string;
+    /** Owning tenant; absent ⇒ bound to KARMA_DEFAULT_AGENT_TENANT ?? MCP_TENANT_ID (fail-closed). */
+    tenant?: string;
     crypto: CryptoV3;
   }>;
 }
@@ -64,6 +68,14 @@ export interface SocialGraphSummary {
   total_spent_phrs: string; // sum of escrow on all requester jobs
   unique_partners: number; // distinct counterpart addresses
   reputation_score: number; // from BM25 index (0 extra RPC) or BASE fallback (50)
+  /**
+   * True when job edges exceeded KARMA_SOCIAL_GRAPH_MAX_JOBS (A3 DoS cap). When true, the detail
+   * arrays and total_earned/total_spent are computed over the most-recent capped subset and are
+   * therefore PARTIAL — total_jobs_provided/requested and total_unique_jobs remain full counts.
+   */
+  truncated: boolean;
+  /** Distinct job edges seen before applying the cap (full count, even when truncated). */
+  total_unique_jobs: number;
 }
 
 /** query_social_graph format:"full" result. */
@@ -85,4 +97,11 @@ export interface SkillDocument {
   reputation_score: number;
   owner_address: string;
   active: boolean;
+  /**
+   * Trust Gate (Phase 1): minimum requester reputation (0..100) the owner requires to invoke
+   * this skill. App-layer policy only — there is no on-chain field for it yet, so it is absent
+   * on docs hydrated from chain (skillDocFromChain) and carried forward across re-index by
+   * BM25SkillIndex.upsert. Undefined / 0 ⇒ no gate. Phase 2 moves this on-chain.
+   */
+  min_reputation_to_invoke?: number;
 }
