@@ -27,6 +27,9 @@ import { agentSkillRegistryAbi } from "./abi.js";
 
 const RPC_URL = process.env.PHAROS_RPC_URL ?? "https://atlantic.dplabs-internal.com";
 const CHAIN_ID = Number(process.env.PHAROS_CHAIN_ID ?? 688689);
+// Receipt-poll cadence. viem defaults to 4000ms, which dominates perceived confirm time on a
+// fast chain. PHAROS_POLL_INTERVAL_MS (e.g. 300 for demos) tightens it; unset → viem default.
+const POLL_INTERVAL_MS = process.env.PHAROS_POLL_INTERVAL_MS ? Number(process.env.PHAROS_POLL_INTERVAL_MS) : undefined;
 
 /** MCP execution-lock TTL (src Layer-0). A receipt wait must give up before this. */
 export const MCP_LOCK_TTL_MS = 420_000;
@@ -43,7 +46,7 @@ export const pharosAtlantic = defineChain({
 const transport = http(RPC_URL, { batch: { batchSize: 100 } });
 
 function makePublicClient() {
-  return createPublicClient({ chain: pharosAtlantic, transport });
+  return createPublicClient({ chain: pharosAtlantic, transport, pollingInterval: POLL_INTERVAL_MS });
 }
 
 let _publicClient: ReturnType<typeof makePublicClient> | undefined;
@@ -55,7 +58,7 @@ export function getPublicClient() {
 
 /** A write client bound to one keystore account (per-call; the account carries the nonceManager). */
 export function getWalletClient(account: Account) {
-  return createWalletClient({ account, chain: pharosAtlantic, transport });
+  return createWalletClient({ account, chain: pharosAtlantic, transport, pollingInterval: POLL_INTERVAL_MS });
 }
 
 /** Deployed AgentSkillRegistry address from env; throws if not yet deployed (plan P2.6 gate). */

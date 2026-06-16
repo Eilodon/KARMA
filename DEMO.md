@@ -36,6 +36,10 @@ ALPHA social graph: asProvider=[1] asRequester=[]
 Reputation rose 50 → 55 (BASE_REPUTATION + REPUTATION_STEP) on the single completion, matching the
 Foundry happy-path test. All uint256 amounts/ids cross the tool boundary as strings (D-6).
 
+During the loop, `create_job` is **replayed with the identical (requester, skillId, nonce)** to
+prove exactly-once: the second call returns the existing job #1 and escrows nothing (Layer-0
+on-chain `taskHash` dedup). The run ends with a Layer-0 hardening summary.
+
 ## Reproduce
 
 ```bash
@@ -43,6 +47,37 @@ Foundry happy-path test. All uint256 amounts/ids cross the tool boundary as stri
 # 2. Deploy:
 KEYSTORE_PASSWORD=... pnpm exec tsx src/scripts/deploy_contract.ts
 # 3. Set PHAROS_CONTRACT_ADDRESS in .env to the printed address, then:
-PHAROS_CONTRACT_ADDRESS=0x... KEYSTORE_PASSWORD=... pnpm exec tsx src/scripts/run_demo.ts
-PHAROS_CONTRACT_ADDRESS=0x... KEYSTORE_PASSWORD=... pnpm exec tsx src/scripts/verify_demo.ts
+PHAROS_CONTRACT_ADDRESS=0x... KEYSTORE_PASSWORD=... pnpm demo
+PHAROS_CONTRACT_ADDRESS=0x... KEYSTORE_PASSWORD=... pnpm demo:verify
 ```
+
+Demo knobs: `PHAROS_POLL_INTERVAL_MS=300` tightens receipt polling (viem defaults to 4000ms,
+which otherwise dominates perceived confirm time); `DEMO_JSON=1` emits a machine-readable summary
+line; `NO_COLOR=1` disables ANSI color.
+
+## Layer-2 discovery showcase (offline — no chain, no keystore)
+
+```bash
+pnpm demo:discover
+```
+
+Seeds an in-memory BM25 index (filled from on-chain `SkillRegistered` events in production) and
+calls the real `discover_skills` tool to show:
+
+- **Relevance × reputation ranking** — BM25 text score blended with on-chain reputation
+  (`boost = 1 + rep/100`), so a reputable match outranks a raw text-only match.
+- **BigInt-safe filtering** — `minReputation` / `maxPriceWei` filter without coercing a uint256
+  through a JS number.
+- **Prompt-injection resistance** — a skill whose name/description smuggles bidi-override (`202e`),
+  zero-width (`200b`), and control (`0007`) code points is **sanitized before any agent reads it**.
+
+## Layer-0 hardening (production-grade, all tested)
+
+The economic loop runs on a hardened MCP server. Exercised/asserted by the 323-test suite:
+
+- **Exactly-once** `create_job` (on-chain `taskHash` dedup; proven live in the demo).
+- **Bounded writes** — single broadcast + pending-safe receipt wait that never double-spends.
+- **`smcp:v4:kms` crypto-erasure** — KMS-backed per-tenant DEK across Vault / AWS-KMS / GCP-KMS,
+  two-phase `scheduleErasure`, with an in-process keystore (private keys never leave the runtime).
+- **Output firewall**, JSON-Schema 2020-12 validation, rate limiting, tenant execution locks,
+  and JWT/OIDC resource-server auth.
