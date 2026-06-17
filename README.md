@@ -5,8 +5,8 @@
 The system has three layers:
 
 - **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
-- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Ten MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process.
-- **Layer 2 — `AgentSkillRegistry` contract:** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, and withdrawals. Verified live at [`0xc6d5c146…b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae).
+- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Eleven MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm, plus dispute / claim-after-review), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process and every tool is bound to the caller's tenant (STRIDE-S).
+- **Layer 2 — `AgentSkillRegistry` contract (v2):** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, on-chain Trust Gate, and withdrawals. Verified live at [`0xc6d5c146…b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae).
 
 > Package: `karma`
 > Runtime entrypoint: `dist/index.js`
@@ -77,20 +77,21 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 
 ### Layer 1 — KARMA plugin (fully shipped, 2026-06-16)
 
-- Ten in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `get_agent_reputation`, `query_social_graph`, `get_pending_balance`, `withdraw_balance`.
+- Eleven in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `dispute_result`, `claim_after_review`, `get_agent_reputation`, `query_social_graph`, `get_pending_balance`, `withdraw_balance`. Every tool that resolves a signing account threads the caller's `tenantId` (`getRequestContext()`) into `KarmaService.account/addressOf`, which fails closed via `KeystoreManager.assertOwnedBy` (STRIDE-S tenant→agent isolation).
 - Web3 Secret Storage v3 keystore (`KeystoreManager`): scrypt + aes-128-ctr in-process decrypt. Private keys never exposed — only viem `Account` objects.
 - In-process BM25 skill index (`BM25SkillIndex` via MiniSearch): reputation-boosted ranking, BigInt-safe price/reputation filters, prompt-injection-resistant text sanitization.
 - `SkillEventIndexer`: backfill + live-watch + reconnect on error. Started at server boot by `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`), which reconciles chain events into the BM25 index (SkillRegistered → hydrate+upsert, SkillDeactivated → discard, JobCompleted → refresh that skill's reputation). Health state (`lastIndexedBlock`, `lastEventAt`, `watching`) is surfaced through `karma_health` (`indexer` field).
 - Bounded write helper: exactly-once broadcast with `RECEIPT_TIMEOUT_MS=300_000 < MCP_LOCK_TTL_MS=420_000`. Timeout → `pending` outcome; never resend.
-- Exactly-once job guard: `deriveTaskHash(requester, skillId, nonce)` → check-before-write via `findJobByTaskHash`. No double-escrow on lost-ACK retry.
+- Exactly-once job guard: `deriveTaskHash(requester, skillId, nonce)` → check-before-write via the on-chain `jobByTaskHash` mapping (O(1), v2; PD-003). No double-escrow on lost-ACK retry.
 - All `uint256` amounts and IDs cross the MCP boundary as decimal strings (`jsonSafe`, D-6).
 
 ### Layer 2 — AgentSkillRegistry contract (live on Pharos Atlantic)
 
-- Deployed: [`0xc6d5c146209e0833634bd33fafb9e65081b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae)
-- Deploy tx: [`0x8615c1ce…0cea8c`](https://atlantic.pharosscan.xyz/tx/0x8615c1ce7664913370c341af4342e4f27ffa9dbc3a02d65b8a89d044e10cea8c) (block 24283311, gas 1,462,073)
-- 5-transaction self-referential demo loop completed live — skill registered, job escrowed, result delivered, completion confirmed, payout withdrawn.
-- Reputation: BASE=50, MAX=100, STEP=5 (matches Foundry tests).
+- Deployed (v2): [`0xc6d5c146209e0833634bd33fafb9e65081b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae)
+- Deploy tx: [`0x6946560a…b73cf5`](https://atlantic.pharosscan.xyz/tx/0x6946560ac9ae8dfeb535ad9ca45e6988eb76513876eff83afcfd9ff029b73cf5) (block 24360873, gas 1,773,609). The v1 contract (`0x75ff…f57`) is superseded; its skills were re-registered onto v2 via `src/scripts/migrate_to_v2.ts`.
+- v2 escrow resolution (no permanent fund lock): `deliverResult` opens a `REVIEW_WINDOW` (3 days); the requester may `confirmCompletion` any time, `disputeResult` within the window (refund), or — if the requester ghosts — the provider may `claimAfterReview` after the window.
+- On-chain Trust Gate: `Skill.minReputationToInvoke` + lazy-base-50 `agentReputation` (earned only on arm's-length completions); `createJob` reverts below the threshold.
+- Reputation: BASE=50, MAX=100, STEP=5, REVIEW_WINDOW=3 days (matches the 18 Foundry tests).
 - ABI drift-guarded: `src/__tests__/karma_contract.test.ts` re-reads the Foundry artifact and fails if the Solidity surface diverges from `src/lib/abi.ts`.
 
 Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried live by `karma_pattern_debt`) and `docs/superpowers/pattern-debt.md` (KARMA app layer).
@@ -118,12 +119,14 @@ Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried 
 ### Layer 1 — KARMA skill economy tools
 
 - **`karma_health`** — In-process runtime canary; confirms RPC and contract env presence and reports skill-indexer state (`indexer`: `watching`, `lastIndexedBlock`, `lastEventAt`, or `{ started: false }`).
-- **`register_skill`** — Broadcast `registerSkill(name, description, endpoint, price)` on-chain and upsert into the BM25 index. Optional `minReputationToInvoke` (0..100) sets a **Trust Gate** (Phase 1, app-layer advisory policy enforced by `create_job`).
+- **`register_skill`** — Broadcast `registerSkill(name, description, endpoint, price, minReputationToInvoke)` on-chain and upsert into the BM25 index. Optional `minReputationToInvoke` (0..100) sets a **Trust Gate** — now **on-chain enforced** by `createJob` (v2); the app layer preflights it to avoid a wasted tx.
 - **`discover_skills`** — BM25 free-text search (prefix + fuzzy) with reputation-boost ranking, `maxPriceWei` and `minReputation` filters. Hits expose each skill's `min_reputation_to_invoke`.
-- **`create_job`** — Idempotent escrow: derives `taskHash(requester, skillId, nonce)`, checks existing before broadcast. Returns `exists` on replay, `confirmed`/`pending` on new. **Trust Gate:** if the skill's `min_reputation_to_invoke` > 0 and the requester's reputation is below it, replies `rejected` (`reason: "insufficient_reputation"`) before any escrow.
-- **`deliver_result`** — Provider submits `resultHash` (bytes32) for an open job.
-- **`complete_job`** — Requester confirms; releases escrow to provider's withdrawable balance and bumps reputation.
-- **`get_agent_reputation`** — Read an agent's skills with reputation scores and invocation counts, plus `agentReputation` (max owned-skill reputation) — the value the Trust Gate checks against.
+- **`create_job`** — Idempotent escrow: derives `taskHash(requester, skillId, nonce)`, checks existing (O(1) `jobByTaskHash`) before broadcast. Returns `exists` on replay, `confirmed`/`pending` on new. **Trust Gate:** if the requester's on-chain `agentReputation` is below the skill's `minReputationToInvoke`, replies `rejected` (`reason: "insufficient_reputation"`) before escrow (and the contract would also revert).
+- **`deliver_result`** — Provider submits `resultHash` (bytes32) for an open job; opens the 3-day review window.
+- **`complete_job`** — Requester confirms; releases escrow to provider's withdrawable balance and bumps reputation (skill + both agents, arm's-length only).
+- **`dispute_result`** — Requester rejects a delivered result within the review window; escrow is refunded and the job moves to `Disputed`.
+- **`claim_after_review`** — Provider claims payment after the review window if the requester neither confirmed nor disputed (anti-deadlock).
+- **`get_agent_reputation`** — Read an agent's skills with reputation scores and invocation counts, plus on-chain `agentReputation` (lazy base-50, earned on arm's-length completions) — the value the Trust Gate checks against.
 - **`query_social_graph`** — Job edges for an agent (as provider and as requester); `format: "full"` hydrates each edge into job details plus a summary.
 - **`get_pending_balance`** — Read an agent's withdrawable balance (`pendingWithdrawals`) in wei and formatted PHRS; accepts an `agentId` or raw `address`.
 - **`withdraw_balance`** — Pull the agent's full released-escrow balance to its wallet, closing the economic loop entirely inside MCP. Returns `amountWei` decoded from the `Withdrawn` event.
@@ -179,10 +182,11 @@ Built-in plugin: karma.tool.ts (in-process, trusted)
   |       |-- writeContractBounded (exactly-once, pending on timeout)
   |       |-- SkillEventIndexer (backfill + live-watch + reconnect)
   v
-AgentSkillRegistry.sol (Pharos Atlantic, chainId=688689)
-  |-- registerSkill / deactivateSkill
-  |-- createJob (payable, escrow) / deliverResult / confirmCompletion / claimRefund
-  |-- pendingWithdrawals / withdraw
+AgentSkillRegistry.sol v2 (Pharos Atlantic, chainId=688689)
+  |-- registerSkill (+minReputationToInvoke) / deactivateSkill / setMinReputation
+  |-- createJob (payable, escrow, Trust-Gate require) / deliverResult (opens review window)
+  |-- confirmCompletion / claimAfterReview / disputeResult / claimRefund
+  |-- agentReputation / pendingWithdrawals / withdraw / jobByTaskHash
   |-- getAgentSkills / getProviderJobs / getRequesterJobs
   v
 Storage / telemetry
@@ -246,7 +250,7 @@ Storage / telemetry
 │   │   ├── rate_limit.ts
 │   │   └── vault.ts
 │   ├── plugins/
-│   │   ├── karma.tool.ts            ← KARMA skill economy (10 tools, trusted built-in)
+│   │   ├── karma.tool.ts            ← KARMA skill economy (11 tools, trusted built-in)
 │   │   └── system.tool.ts           ← ping + pattern_debt + test_long_task
 │   ├── scripts/
 │   │   ├── _demo_format.ts          ← zero-dep ANSI presentation helpers for the demos
@@ -254,6 +258,7 @@ Storage / telemetry
 │   │   ├── deploy_contract.ts       ← deploy AgentSkillRegistry (keystore-signed)
 │   │   ├── discover_demo.ts         ← offline BM25 discovery showcase (ranking + injection-strip)
 │   │   ├── migrate_encryption.ts    ← re-encrypt pre-V4 blobs
+│   │   ├── migrate_to_v2.ts         ← v1→v2 skill re-registration (pure planMigration + IO)
 │   │   ├── run_demo.ts              ← 5-tx self-referential KARMA loop
 │   │   ├── setup_keystore.ts        ← generate multi-agent Web3 v3 keystore
 │   │   └── verify_demo.ts           ← read-only post-demo on-chain verification
@@ -310,12 +315,12 @@ Important implementation files:
 | `src/config/env.ts` | Environment schema, defaults, fail-fast production gates. |
 | `src/lib/abi.ts` | Typed ABI for `AgentSkillRegistry.sol`; drift-guard test in `karma_contract.test.ts`. |
 | `src/lib/bm25_index.ts` | `BM25SkillIndex` — MiniSearch, reputation-boosted ranking, BigInt-safe filters, prompt-injection sanitization. |
-| `src/lib/contract.ts` | Pharos viem clients; `runBoundedWrite` (exactly-once); `deriveTaskHash`/`findJobByTaskHash` (dedup guard); `SkillEventIndexer` (backfill + reconnect). |
+| `src/lib/contract.ts` | Pharos viem clients; `runBoundedWrite` (exactly-once); `deriveTaskHash` (dedup key, resolved O(1) via the on-chain `jobByTaskHash` mapping); `SkillEventIndexer` (backfill + reconnect). |
 | `src/lib/karma_service.ts` | `KarmaService` interface (DI seam) + `realKarmaService` (live clients, keystore, index). |
 | `src/lib/keystore.ts` | `KeystoreManager` — Web3 v3 scrypt/aes-128-ctr decrypt; `encryptPrivateKeyV3` for keystore setup. |
 | `src/lib/serialize.ts` | `jsonSafe()` — recursive BigInt → decimal string (D-6). |
 | `src/lib/types.ts` | `AgentIdentity`, `CryptoV3`, `KeystoreFileV3`, `SkillDocument`. |
-| `src/plugins/karma.tool.ts` | 10 KARMA tools; trusted in-process built-in; `assertInProcess()` fail-fast. |
+| `src/plugins/karma.tool.ts` | 11 KARMA tools; trusted in-process built-in; tenant-bound; `assertInProcess()` fail-fast. |
 | `src/plugins/system.tool.ts` | Built-in: `karma_ping`, `karma_pattern_debt`, `karma_test_long_task`. |
 | `src/mcp/adapter/execution_pipeline.ts` | Tool call governance, native task execution, state save, telemetry. |
 | `src/core/task_store.ts` | Durable task store with local/memory/Redis and atomic input consume. |
@@ -393,12 +398,14 @@ Agent A (provider)                        Agent B (requester)
 | Tool | Type | Description |
 | --- | --- | --- |
 | `karma_health` | read-only | Canary: confirms in-process mode and presence of `PHAROS_RPC_URL` / `PHAROS_CONTRACT_ADDRESS`; reports skill-indexer health (`indexer.watching` / `lastIndexedBlock` / `lastEventAt`, or `{ started: false }`). |
-| `register_skill` | write | Broadcast `registerSkill` on-chain and upsert into BM25 index. Returns `pending` if receipt times out. Optional `minReputationToInvoke` (0..100) sets the Trust Gate threshold. |
+| `register_skill` | write | Broadcast `registerSkill` on-chain and upsert into BM25 index. Returns `pending` if receipt times out. Optional `minReputationToInvoke` (0..100) sets the on-chain Trust Gate threshold. |
 | `discover_skills` | read-only | BM25 free-text search (prefix + fuzzy 0.2, name boost ×2), reputation-boosted ranking, optional `maxPriceWei` and `minReputation` filters. Hits include `min_reputation_to_invoke`. |
-| `create_job` | write (idempotent) | Derive `taskHash(requester, skillId, idempotencyNonce)`, check existing before broadcast. Reply `exists` on replay. **Trust Gate:** replies `rejected` if requester reputation < the skill's `min_reputation_to_invoke`, before any escrow. |
-| `deliver_result` | write | Provider submits `resultHash` (0x + 64 hex) for an open job. |
-| `complete_job` | write | Requester confirms; escrow credited to provider's withdrawable balance; reputation +5. |
-| `get_agent_reputation` | read-only | Agent's skills with `reputation`, `totalInvocations`, `active`, plus aggregate `agentReputation` (Trust Gate input). |
+| `create_job` | write (idempotent) | Derive `taskHash(requester, skillId, idempotencyNonce)`, check existing (O(1) `jobByTaskHash`) before broadcast. Reply `exists` on replay. **Trust Gate:** replies `rejected` if on-chain `agentReputation` < the skill's `minReputationToInvoke`, before any escrow (contract also reverts). |
+| `deliver_result` | write | Provider submits `resultHash` (0x + 64 hex) for an open job; opens the 3-day review window. |
+| `complete_job` | write | Requester confirms; escrow credited to provider's withdrawable balance; skill reputation +5; arm's-length agent reputation +5. |
+| `dispute_result` | write | Requester rejects a delivered result within the review window → refund + `Disputed`. Reverts on-chain after the window. |
+| `claim_after_review` | write | Provider claims payment after the review window if the requester ghosted (anti-deadlock). Reverts while the window is open. |
+| `get_agent_reputation` | read-only | Agent's skills with `reputation`, `totalInvocations`, `active`, plus on-chain `agentReputation` (lazy base-50; Trust Gate input). |
 | `query_social_graph` | read-only | Job edges for an agent: `asProvider` and `asRequester` job-ID arrays (`format: "full"` → hydrated details + summary). |
 | `get_pending_balance` | read-only | Agent's withdrawable balance (`pendingWithdrawals`) as `withdrawableWei` + `formattedPHRS`; accepts `agentId` or `address`. |
 | `withdraw_balance` | write | Pull full released escrow to the agent's wallet; `amountWei` decoded from the `Withdrawn` event. Reverts on-chain if nothing to withdraw. |
@@ -480,11 +487,18 @@ The keystore file format:
     {
       "agentId": "agent-alpha",
       "address": "0x857c2F11...",
+      "tenant": "tenant-a",
       "crypto": { "cipher": "aes-128-ctr", "ciphertext": "...", ... }
     }
   ]
 }
 ```
+
+Each agent may carry an optional `tenant` (STRIDE-S tenant→agent isolation). A tool call may only
+resolve an agent owned by the caller's `tenantId`; an agent with no `tenant` field binds **fail-closed**
+to `KARMA_DEFAULT_AGENT_TENANT ?? MCP_TENANT_ID` (so single-operator stdio keeps working, and a
+different multi-tenant caller is denied). In api-key/gateway deployments where the request tenant is
+not `MCP_TENANT_ID`, set `KARMA_DEFAULT_AGENT_TENANT` or give each agent an explicit `tenant`.
 
 ### Generate a keystore
 
@@ -967,6 +981,13 @@ Covered surfaces:
 
 Detected patterns include: private-key blocks, OpenAI-like keys, GitHub-like tokens, AWS access key IDs, Luhn-valid payment cards, SSN-like values, prompt-injection markers, and sensitive field names (`apiKey`, `secret`, `token`, `password`, `authorization`, `private_key`, and related variants).
 
+**Error path (A2):** thrown tool errors are also sanitized — every error funnels through a single
+`toClientError` chokepoint in `execution_pipeline.ts` and is passed through `redactErrorText`
+(credentials/PII + filesystem paths + redis/postgres connection strings + bare private-key-shaped
+`0x`+64hex, error-path-only) before the message reaches the client. The full error is retained
+server-side in telemetry. `scanToolOutput` is deliberately left unchanged so legitimate
+`result_hash`/`taskHash` values in normal output are never mangled.
+
 Strict PII mode (opt-in):
 
 ```env
@@ -1148,6 +1169,9 @@ All Layer 0 configuration is read in `src/config/env.ts`. KARMA app-layer env va
 | `PHAROS_EXPLORER` | `https://atlantic.pharosscan.xyz` | Explorer base URL for demo links. |
 | `KEYSTORE_PATH` | `./keystore.json` | Web3 v3 keystore file (multi-agent). |
 | `KEYSTORE_PASSWORD` | unset | Keystore decryption password. Required for write ops. |
+| `KARMA_DEFAULT_AGENT_TENANT` | unset (→ `MCP_TENANT_ID`) | Tenant a keystore agent binds to when its entry omits `tenant` (STRIDE-S, fail-closed). Set to the live tenant id in api-key/gateway deployments. |
+| `KARMA_SOCIAL_GRAPH_MAX_JOBS` | `500` | Cap on job edges `query_social_graph` `format:"full"` hydrates (chunked by 100); over the cap, the most-recent edges are kept and `summary.truncated=true`. |
+| `KARMA_INDEXER_FROM_BLOCK` | `0` | Block the `SkillEventIndexer` backfills from on boot. Set to the contract deploy block after a (re)deploy to skip stale history. |
 | `DEMO_PRICE_WEI` | `100000000000000` | Default skill price for `run_demo.ts`. |
 
 ### HTTP security
@@ -1306,11 +1330,14 @@ pnpm audit --audit-level=high
 | --- | --- |
 | `karma_builtin_plugin.test.ts` | Plugin loads as trusted built-in; `assertInProcess` canary. |
 | `karma_contract.test.ts` | ABI structural drift guard vs Foundry artifact. |
-| `karma_exactly_once.test.ts` | `deriveTaskHash` / `findJobByTaskHash` exactly-once dedup logic. |
+| `karma_exactly_once.test.ts` | `deriveTaskHash` exactly-once dedup logic (now O(1) `jobByTaskHash` on-chain). |
+| `karma_service_integration.test.ts` | realKarmaService ↔ anvil end-to-end: register→read→create→dedup→deliver→confirm→withdraw + dispute, covering v2 decode paths (skips without anvil). Closes PD-002. |
+| `migrate_to_v2.test.ts` | Pure `planMigration` v1→v2 filter/sort/threshold-default. |
+| `execution_pipeline_error_redaction.test.ts` | `toClientError` redaction (incl. private-key hex) + `isTenantMismatchError` (PD-006). |
 | `karma_indexer.test.ts` | `SkillEventIndexer` backfill, reconnect, heartbeat state machine. |
 | `skill_indexer_runtime.test.ts` | Chain-event → BM25 reconciliation (`applyIndexedEvent`) and indexer-health surfacing. |
 | `karma_plugin_health.test.ts` | `karma_health` tool: env detection, in-process flag. |
-| `karma_tools.test.ts` | All 9 economy tools over a fake `KarmaService`. |
+| `karma_tools.test.ts` | All 11 economy tools over a fake `KarmaService`; tenant threading + on-chain Trust Gate + fan-out cap. |
 | `karma_write_helper.test.ts` | `runBoundedWrite` confirmed/pending/revert paths. |
 | `bm25_index.test.ts` | `BM25SkillIndex`: upsert, discard, search, reputation boost, price filter, sanitize. |
 | `keystore.test.ts` | Web3 v3 decrypt/encrypt round-trip; MAC mismatch; wrong KDF/cipher. |
@@ -1339,7 +1366,7 @@ Runtime report tool: `karma_pattern_debt` (reads from `src/core/pattern_debt.ts`
 
 Debt registries:
 - `src/core/pattern_debt.ts` — Layer 0 runtime items DEBT-001 to DEBT-006, queried live by `karma_pattern_debt`.
-- `docs/superpowers/pattern-debt.md` — KARMA app-layer items PD-001 to PD-003, tracked separately.
+- `docs/superpowers/pattern-debt.md` — KARMA app-layer items PD-001 to PD-006, tracked separately.
 
 ### Layer 0 debt (DEBT-001 to DEBT-006)
 
@@ -1354,15 +1381,18 @@ Authoritative source: `src/core/pattern_debt.ts`. The table below reflects the *
 | `DEBT-005-output-firewall-coverage` | **Partially resolved** | Structured redaction implemented with deterministic patterns and limits. No DLP/classifier backend. |
 | `DEBT-006-redis-trauma-registry` | **Implemented** | Redis/memory rate limiters use bounded violation records with severity EMA/backoff. |
 
-### KARMA app-layer debt (PD-001 to PD-003)
+### KARMA app-layer debt (PD-001 to PD-006)
 
 Documented in `docs/superpowers/pattern-debt.md`.
 
 | Debt | Status | Current truth |
 | --- | --- | --- |
-| `PD-001` — pre-existing Layer-0 test failures | **Resolved** (2026-06-16, commit `db7ea72`) | 8 stale tests aligned to post-hardening code; 1 env-locked test skip-guarded. Full suite: 315 passed, 1 skipped, 0 failed. |
-| `PD-002` — network glue has live-only coverage | **Open (reduced)** | `writeContractBounded` and `realKarmaService` reads are still verified only by the live P7 demo. The indexer wiring is now unit-tested: `mapLog`/`toIndexedEvents`/`buildViemIndexerDeps` (`karma_indexer.test.ts`) cover log decoding + deps construction against a fake client, so only the trivial `startSkillIndexer` singleton resolution (`getPublicClient`/`getContractAddress` + `new` + `start`) remains demo-only. The same injectable-client pattern can close the read/write paths next. |
-| `PD-003` — exactly-once guard is O(n) scan | **Open** | `findJobByTaskHash` scans all of `getRequesterJobs(requester)` per `create_job` call. Correct at demo scale; degrades as requester accumulates jobs. Resolution: add on-chain `jobByTaskHash` mapping in contract v2 when `jobCount() > 1000` or any requester owns > 100 jobs. |
+| `PD-001` — pre-existing Layer-0 test failures | **Resolved** (2026-06-16, commit `db7ea72`) | 8 stale tests aligned to post-hardening code; 1 env-locked test skip-guarded. |
+| `PD-002` — network glue has live-only coverage | **Resolved** (2026-06-17) | `karma_service_integration.test.ts` exercises realKarmaService against a real EVM (anvil) end-to-end — register→read→create→O(1) dedup→deliver→confirm→withdraw + dispute — covering the readContract/writeContractBounded decode paths. Skips cleanly without anvil/artifact. |
+| `PD-003` — exactly-once guard is O(n) scan | **Resolved** (2026-06-17, v2 live) | Replaced by the on-chain `jobByTaskHash` mapping; `findExistingJob` is now an O(1) read. Live on v2 `0xc6d5c146…b905ae`. |
+| `PD-004` — skill indexer has no persisted checkpoint | **Open** | `SkillEventIndexer` backfills from `KARMA_INDEXER_FROM_BLOCK` (or 0) on every boot — no persisted `lastIndexedBlock`. Low-payoff on a fresh testnet; revisit at scale / multi-instance. |
+| `PD-005` — Trust Gate was app-layer advisory | **Resolved** (2026-06-17, v2 live) | On-chain `agentReputation` + `Skill.minReputationToInvoke` + `createJob` require — consensus-enforced. Residual: wash-trade resistance needs stake/identity (out of scope). |
+| `PD-006` — no tenant-mismatch alarm signal | **Resolved** (2026-06-17) | The pipeline classifies `isTenantMismatchError` and emits a distinct `tenant_agent_mismatch` telemetry event for security monitoring. |
 
 Non-goals intentionally preserved:
 
@@ -1412,6 +1442,14 @@ The keystore was not loaded, or the agent ID does not exist in the keystore file
 
 Wrong `KEYSTORE_PASSWORD` or corrupt keystore file.
 
+### `[KARMA] agent '<id>' is not accessible to this tenant`
+
+STRIDE-S tenant→agent isolation: the calling `tenantId` does not own that keystore agent. Either the
+agent's `tenant` field (or the `KARMA_DEFAULT_AGENT_TENANT` fallback) doesn't match the request tenant.
+In api-key/gateway HTTP the request tenant is **not** `MCP_TENANT_ID` — set `KARMA_DEFAULT_AGENT_TENANT`
+to the live tenant id, or give each keystore agent an explicit `tenant`. A `tenant_agent_mismatch`
+telemetry event is emitted for monitoring.
+
 ### `karma_health` returns `rpcEnv=false` or `contractEnv=false`
 
 Set `PHAROS_RPC_URL` and `PHAROS_CONTRACT_ADDRESS` in the environment.
@@ -1422,7 +1460,7 @@ This is correct idempotent behavior. The same `(requester, skillId, idempotencyN
 
 ### `create_job` or `register_skill` returns `status: "pending"`
 
-The transaction was broadcast but the receipt did not arrive before `RECEIPT_TIMEOUT_MS=300_000`. The transaction is on the wire — **do not resend**. Poll the explorer for the tx hash from the response, or retry with the same `idempotencyNonce` (which will detect the existing job via `findJobByTaskHash` once confirmed).
+The transaction was broadcast but the receipt did not arrive before `RECEIPT_TIMEOUT_MS=300_000`. The transaction is on the wire — **do not resend**. Poll the explorer for the tx hash from the response, or retry with the same `idempotencyNonce` (which will detect the existing job via the on-chain `jobByTaskHash` mapping once confirmed).
 
 ### `discover_skills` returns 0 results after restart
 
