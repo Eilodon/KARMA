@@ -72,6 +72,12 @@ restart durability is a minor cosmetic gap, not an enforcement gap.
   (abi.ts ↔ rebuilt artifact) and the updated v2 gate/tool tests. [verified 2026-06-17]
 - `pnpm typecheck` clean; `pnpm eslint "src/**/*.ts"` clean. [verified 2026-06-17]
 - Live redeploy/migration NOT executed (operator-gated). [ASSUMED — verify post-deploy]
+- [G.CDOC 2026-06-17] Spot-checked vs code: `claimRefund` keeps `status==Open` (sol:234) BEFORE the
+  deadline read (sol:235) → FM1 safe; both completion paths call `_settleCompletion` (sol:185,195)
+  whose self-deal guard is `requester != j.provider` (sol:222); `createJob` gate require (sol:146);
+  `deliverResult` sets the review window (sol:175); service `findExistingJob` reads `jobByTaskHash`
+  (karma_service:172); plugin gate reads `skill.minReputationToInvoke` + `getAgentReputation`
+  (karma.tool:314,316). All VERIFIED.
 
 ## 8. Owner
 **KARMA team — gokuderafight@gmail.com**
