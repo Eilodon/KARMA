@@ -50,7 +50,8 @@ describe("registrar system tool governance", () => {
     const source = await readFile(new URL("../mcp/adapter/execution_pipeline.ts", import.meta.url), "utf-8");
 
     const createCall = source.indexOf("globalTaskStore.createTask({");
-    const taskPromise = source.indexOf("const taskPromise = globalExecutionLockManager");
+    // Fix 4 (ADR-006): the work is deferred behind a thunk so the tracker gates start.
+    const taskPromise = source.indexOf("const startTask = () => globalExecutionLockManager");
     expect(createCall).toBeGreaterThan(0);
     expect(taskPromise).toBeGreaterThan(0);
     expect(createCall).toBeLessThan(taskPromise);

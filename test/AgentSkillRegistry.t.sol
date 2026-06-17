@@ -16,7 +16,7 @@ contract AgentSkillRegistryTest is Test {
     bytes32 internal constant RESULT_HASH = keccak256("result-data");
 
     function setUp() public {
-        reg = new AgentSkillRegistry();
+        reg = new AgentSkillRegistry(3 days); // DEFAULT_REVIEW_WINDOW
         vm.deal(beta, 10 ether);
         vm.deal(alpha, 10 ether);
     }
@@ -264,6 +264,63 @@ contract AgentSkillRegistryTest is Test {
         uint256 jobId = _openJob(skillId);
         assertEq(reg.jobByTaskHash(TASK_HASH), jobId, "taskHash maps to jobId");
         assertEq(reg.jobByTaskHash(keccak256("never")), 0, "unknown taskHash maps to 0");
+    }
+
+    // ── Fix 5: durable on-chain exactly-once (no double-escrow on lost-ack retry) ──
+    // The app derives a deterministic taskHash from (requester, skillId, idempotencyNonce) and
+    // does a check-before-write, but that check cannot see a tx still in the mempool. The contract
+    // is the source of truth: a second escrow for an already-used taskHash MUST revert, so a retry
+    // that re-broadcasts before the first tx mines cannot create a second escrowed job.
+    function test_CreateJob_DuplicateTaskHash_Reverts() public {
+        uint256 skillId = _registerSkill();
+        uint256 jobId = _openJob(skillId); // first job with TASK_HASH
+        assertEq(reg.jobByTaskHash(TASK_HASH), jobId, "first job indexed by taskHash");
+
+        vm.prank(beta);
+        vm.expectRevert(bytes("duplicate taskHash"));
+        reg.createJob{value: PRICE}(skillId, TASK_HASH, DEADLINE_SECS);
+
+        // Escrow taken exactly once — the registry holds a single PRICE, not two.
+        assertEq(address(reg).balance, PRICE, "no double escrow");
+        assertEq(reg.jobByTaskHash(TASK_HASH), jobId, "dedup index still points at the first job");
+    }
+
+    // ── R1/ADR-1: review window is deploy-time config (immutable), bounded ──
+    function test_Constructor_DefaultWindowMatchesConstant() public view {
+        assertEq(reg.REVIEW_WINDOW(), reg.DEFAULT_REVIEW_WINDOW(), "setUp deploys the default window");
+        assertEq(reg.DEFAULT_REVIEW_WINDOW(), 3 days, "default review window is 3 days");
+    }
+
+    function test_Constructor_SetsConfigurableImmutableWindow() public {
+        AgentSkillRegistry r = new AgentSkillRegistry(7 days);
+        assertEq(r.REVIEW_WINDOW(), 7 days, "review window taken from the constructor arg");
+    }
+
+    function test_Constructor_RejectsBelowMin() public {
+        uint256 belowMin = reg.MIN_REVIEW_WINDOW() - 1; // read view BEFORE expectRevert latches
+        vm.expectRevert(bytes("bad review window"));
+        new AgentSkillRegistry(belowMin);
+    }
+
+    function test_Constructor_RejectsAboveMax() public {
+        uint256 aboveMax = reg.MAX_REVIEW_WINDOW() + 1; // read view BEFORE expectRevert latches
+        vm.expectRevert(bytes("bad review window"));
+        new AgentSkillRegistry(aboveMax);
+    }
+
+    function test_Constructor_ConfiguredWindowDrivesDisputeBoundary() public {
+        AgentSkillRegistry r = new AgentSkillRegistry(1 hours);
+        vm.prank(alpha);
+        uint256 skillId = r.registerSkill("s", "d", "mcp://a", PRICE, 0);
+        vm.prank(beta);
+        uint256 jobId = r.createJob{value: PRICE}(skillId, TASK_HASH, DEADLINE_SECS);
+        vm.prank(alpha);
+        r.deliverResult(jobId, RESULT_HASH);
+        // dispute reverts just past the configured (short) window — boundary tracks REVIEW_WINDOW
+        vm.warp(block.timestamp + 1 hours + 1);
+        vm.prank(beta);
+        vm.expectRevert(bytes("review window closed"));
+        r.disputeResult(jobId);
     }
 
     // ── Reentrancy (P2.5 HIGH) ─────────────────────────────────

@@ -12,6 +12,15 @@ import { startKarmaIndexer, stopKarmaIndexer } from "./lib/skill_indexer_runtime
 
 let runtime: SuperMcpRuntime;
 
+// Last-resort safety net (KARMA-PH1-001): a stray unhandled promise rejection from any background
+// task (e.g. the on-chain indexer's watch/reconnect path) would, under Node's default, terminate
+// this long-running MCP host and take every tenant down with it. The proper fix lives at each call
+// site (the indexer now self-heals); this handler only logs so a single missed `.catch` somewhere
+// can never silently crash the server. It deliberately does NOT exit.
+process.on("unhandledRejection", (reason) => {
+  console.error("[KARMA] Unhandled promise rejection (kept alive — investigate the originating path):", reason);
+});
+
 function parseList(raw: string): string[] {
   return raw.split(",").map(s => s.trim()).filter(Boolean);
 }
@@ -223,6 +232,11 @@ async function main() {
       }
 
       stopKarmaIndexer();
+
+      // Drop in-memory agent signing keys on shutdown (DEBT-007): shrinks the heap-exposure window
+      // for the decrypted viem accounts. Best-effort (V8 can't force-zero the closure-held key).
+      const { keystoreManager } = await import("./lib/keystore.js");
+      keystoreManager.clear();
 
       const { globalTaskTracker } = await import("./core/task_tracker.js");
       globalTaskTracker.beginDraining();

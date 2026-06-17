@@ -74,7 +74,7 @@ async function waitForRpc(timeoutMs = 10_000): Promise<void> {
     const wallet = createWalletClient({ account: deployer, chain: anvilChain, transport: http(RPC) });
     const pub = createPublicClient({ chain: anvilChain, transport: http(RPC) });
     const artifact = JSON.parse(readFileSync(ARTIFACT, "utf8")) as { bytecode: { object: `0x${string}` } };
-    const hash = await wallet.deployContract({ abi: agentSkillRegistryAbi, bytecode: artifact.bytecode.object, account: deployer, chain: anvilChain });
+    const hash = await wallet.deployContract({ abi: agentSkillRegistryAbi, bytecode: artifact.bytecode.object, args: [259_200n], account: deployer, chain: anvilChain }); // 259200 = 3 days review window
     const receipt = await pub.waitForTransactionReceipt({ hash });
     const contractAddress = receipt.contractAddress as Address;
 

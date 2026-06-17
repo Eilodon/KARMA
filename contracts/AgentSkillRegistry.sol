@@ -46,7 +46,16 @@ contract AgentSkillRegistry is ReentrancyGuard {
     uint256 public constant MAX_REPUTATION = 100;
     uint256 public constant REPUTATION_STEP = 5;
     /// @notice Post-delivery review window — a delivered job auto-settles to the provider after this.
-    uint256 public constant REVIEW_WINDOW = 3 days;
+    ///         Set once at deploy time (immutable): configurable per deployment but fixed and
+    ///         predictable afterwards — no owner-mutable governance surface. Bounded so it stays
+    ///         generous enough that mempool latency near the dispute boundary is negligible (R1/ADR-1):
+    ///         a hard timestamp boundary is inherent to any optimistic dispute window, so the mitigation
+    ///         is a sufficiently long window, not a (boundary-shifting) grace period.
+    uint256 public immutable REVIEW_WINDOW;
+    uint256 public constant MIN_REVIEW_WINDOW = 1 hours;
+    uint256 public constant MAX_REVIEW_WINDOW = 30 days;
+    /// @notice Recommended default review window when a deployer does not override it.
+    uint256 public constant DEFAULT_REVIEW_WINDOW = 3 days;
 
     // ── State ──────────────────────────────────────────────────
     uint256 private _skillIdCounter;
@@ -73,6 +82,18 @@ contract AgentSkillRegistry is ReentrancyGuard {
     event ResultDisputed(uint256 indexed jobId, address indexed requester, uint256 amount);
     event MinReputationSet(uint256 indexed skillId, uint256 minReputation);
     event Withdrawn(address indexed who, uint256 amount);
+
+    // ── Constructor ────────────────────────────────────────────
+    /// @param reviewWindowSecs post-delivery review window (seconds). Deploy-time config, then
+    ///        immutable. Pass DEFAULT_REVIEW_WINDOW (3 days) for the recommended value; bounded
+    ///        to [MIN_REVIEW_WINDOW, MAX_REVIEW_WINDOW] = [1 hour, 30 days].
+    constructor(uint256 reviewWindowSecs) {
+        require(
+            reviewWindowSecs >= MIN_REVIEW_WINDOW && reviewWindowSecs <= MAX_REVIEW_WINDOW,
+            "bad review window"
+        );
+        REVIEW_WINDOW = reviewWindowSecs;
+    }
 
     // ── Skill lifecycle ────────────────────────────────────────
     function registerSkill(
@@ -144,6 +165,11 @@ contract AgentSkillRegistry is ReentrancyGuard {
         require(msg.value == s.pricePerCall, "escrow must equal price");
         require(deadlineSecs > 0, "deadline required");
         require(agentReputation(msg.sender) >= s.minReputationToInvoke, "insufficient reputation");
+        // Fix 5: durable on-chain exactly-once. taskHash binds the requester (off-chain it is
+        // keccak(requester, skillId, idempotencyNonce)), so a non-zero entry here means this exact
+        // request already escrowed a job. Reverting refunds msg.value and stops a lost-ack retry —
+        // one that re-broadcasts before the first tx mined — from creating a second escrowed job.
+        require(jobByTaskHash[taskHash] == 0, "duplicate taskHash");
 
         jobId = ++_jobIdCounter;
         jobs[jobId] = Job({

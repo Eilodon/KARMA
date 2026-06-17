@@ -11,6 +11,13 @@ const TXH = "0xabc123" as const;
 
 const confirmed = { status: "confirmed" as const, hash: TXH, receipt: {} as never };
 
+/** A fake on-chain job at a given JobStatus (0=Open,1=Delivered,2=Completed,3=Refunded,4=Disputed). */
+const jobAt = (status: number, over: Record<string, unknown> = {}) => ({
+  requester: ALPHA, provider: ALPHA, skillId: 1n, taskHash: `0x${"00".repeat(32)}`,
+  escrowAmount: 0n, deadline: 0n, status, resultHash: `0x${"00".repeat(32)}`,
+  createdAt: 1750145678n, completedAt: 0n, ...over,
+}) as never;
+
 const skill = (over: Partial<OnchainSkill> = {}): OnchainSkill => ({
   owner: ALPHA,
   name: "discover_skills",
@@ -93,7 +100,7 @@ describe("P6 KARMA tools", () => {
     tools = createKarmaTools(svc);
   });
 
-  it("exposes the 9 economy tools, all network-capable with no required scopes (D-2)", () => {
+  it("exposes the economy tools, all network-capable with no required scopes (D-2)", () => {
     const names = tools.map((t) => t.name);
     for (const n of [
       "register_skill",
@@ -103,6 +110,7 @@ describe("P6 KARMA tools", () => {
       "complete_job",
       "dispute_result",
       "claim_after_review",
+      "read_job",
       "get_agent_reputation",
       "query_social_graph",
       "get_pending_balance",
@@ -235,19 +243,29 @@ describe("P6 KARMA tools", () => {
     expect((res.structuredContent as { agentReputation: number }).agentReputation).toBe(65);
   });
 
-  it("deliver_result + complete_job: return tx hash and never leak bigint", async () => {
+  it("deliver_result: proceeds when the job is Open, returns tx hash, no bigint", async () => {
+    // default fake readJob → status Open(0), which is deliver_result's expected precondition
     const dr = await call(tool(tools, "deliver_result"), {
       agentId: "agent-alpha",
       jobId: "4",
       resultHash: `0x${"11".repeat(32)}`,
     });
     expect((dr.structuredContent as { txHash: string }).txHash).toBe(TXH);
+    expect(svc.deliverResult).toHaveBeenCalledTimes(1);
+    expect(hasBigInt(dr.structuredContent)).toBe(false);
+  });
+
+  it("complete_job: proceeds when the job is Delivered and confirms completion", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(1)) }); // Delivered
+    tools = createKarmaTools(svc);
     const cj = await call(tool(tools, "complete_job"), { agentId: "agent-beta", jobId: "4" });
     expect((cj.structuredContent as { txHash: string }).txHash).toBe(TXH);
-    expect(svc.confirmCompletion).toHaveBeenCalled();
+    expect(svc.confirmCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("dispute_result: requester rejects a delivered job within the review window", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(1)) }); // Delivered
+    tools = createKarmaTools(svc);
     const res = await call(tool(tools, "dispute_result"), { agentId: "agent-beta", jobId: "4" });
     expect((res.structuredContent as { jobId: string; txHash: string }).jobId).toBe("4");
     expect((res.structuredContent as { txHash: string }).txHash).toBe(TXH);
@@ -255,11 +273,70 @@ describe("P6 KARMA tools", () => {
     expect(svc.account).toHaveBeenCalledWith("agent-beta", "tenant_local");
   });
 
-  it("claim_after_review: provider claims after the review window", async () => {
+  it("claim_after_review: provider claims a delivered job (Completed target)", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(1)) }); // Delivered
+    tools = createKarmaTools(svc);
     const res = await call(tool(tools, "claim_after_review"), { agentId: "agent-alpha", jobId: "4" });
     expect((res.structuredContent as { jobId: string }).jobId).toBe("4");
     expect(svc.claimAfterReview).toHaveBeenCalledTimes(1);
     expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  // ── R2 / ADR-2: graceful status-idempotency for lifecycle writes ──────────────
+  it("complete_job: a retry whose tx already mined returns already_done (no second tx)", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(2)) }); // Completed == target
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "complete_job"), { agentId: "agent-beta", jobId: "4" });
+    expect(res.structuredContent).toMatchObject({ status: "already_done", jobId: "4", jobStatus: "Completed" });
+    expect(svc.confirmCompletion).not.toHaveBeenCalled();
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+  });
+
+  it("deliver_result: a job already past Open is an idempotent no-op (no second deliver)", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(1)) }); // Delivered == target
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "deliver_result"), { agentId: "agent-alpha", jobId: "4", resultHash: `0x${"11".repeat(32)}` });
+    expect(res.structuredContent).toMatchObject({ status: "already_done", jobStatus: "Delivered" });
+    expect(svc.deliverResult).not.toHaveBeenCalled();
+  });
+
+  it("claim_after_review: a job already Completed by the requester's confirm is an idempotent no-op", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(2)) }); // Completed == target
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "claim_after_review"), { agentId: "agent-alpha", jobId: "4" });
+    expect(res.structuredContent).toMatchObject({ status: "already_done", jobStatus: "Completed" });
+    expect(svc.claimAfterReview).not.toHaveBeenCalled();
+  });
+
+  it("complete_job: a conflicting on-chain status returns unexpected_state and sends NO tx", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(4)) }); // Disputed (requester disputed instead)
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "complete_job"), { agentId: "agent-beta", jobId: "4" });
+    expect(res.structuredContent).toMatchObject({ status: "unexpected_state", jobStatus: "Disputed", expected: "Delivered" });
+    expect(svc.confirmCompletion).not.toHaveBeenCalled();
+  });
+
+  it("read_job: returns on-chain job state by id with a status label, no bigint, no signing account", async () => {
+    svc = fakeService({
+      readJob: vi.fn(async () => jobAt(1, { escrowAmount: 100_000_000_000_000n, resultHash: `0x${"ab".repeat(32)}`, deadline: 1750200000n })),
+    });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "read_job"), { jobId: "4" });
+    const sc = res.structuredContent as { jobId: string; status: string; escrowWei: string; escrowPHRS: string; resultHash: string | null };
+    expect(sc.jobId).toBe("4");
+    expect(sc.status).toBe("Delivered");
+    expect(sc.escrowWei).toBe("100000000000000");
+    expect(sc.escrowPHRS).toBe("0.000100");
+    expect(sc.resultHash).toBe(`0x${"ab".repeat(32)}`);
+    expect(hasBigInt(res.structuredContent)).toBe(false);
+    expect(svc.account).not.toHaveBeenCalled(); // read-only public on-chain data
+  });
+
+  it("read_job: an all-zero result hash surfaces as null", async () => {
+    svc = fakeService({ readJob: vi.fn(async () => jobAt(0)) });
+    tools = createKarmaTools(svc);
+    const res = await call(tool(tools, "read_job"), { jobId: "9" });
+    expect((res.structuredContent as { resultHash: string | null }).resultHash).toBeNull();
   });
 
   it("get_agent_reputation: stringifies totalInvocations + skillId (D-6)", async () => {

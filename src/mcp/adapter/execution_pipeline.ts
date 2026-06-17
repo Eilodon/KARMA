@@ -215,7 +215,7 @@ export function isTenantMismatchError(error: unknown): boolean {
  * Transient errors release the idempotency lock so callers can resubmit.
  * Permanent errors (tool logic failures) commit with a short error TTL.
  */
-function isTransientError(error: unknown): boolean {
+export function isTransientError(error: unknown): boolean {
   const TRANSIENT_CODES = new Set([
     "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND",
     "ECONNABORTED", "EHOSTUNREACH", "ENETDOWN", "ENETUNREACH",
@@ -238,6 +238,7 @@ function isTransientError(error: unknown): boolean {
       /socket hang up/i.test(message) ||
       /timed? ?out|timeout/i.test(message) ||
       /connect(ion)? (refused|reset|lost|closed|timed? ?out)/i.test(message) ||
+      /could not acquire .*lock/i.test(message) ||
       (/redis/i.test(message) && /(connect|ECONNREFUSED|timeout|timed? ?out)/i.test(message))
     ) {
       return true;
@@ -247,6 +248,30 @@ function isTransientError(error: unknown): boolean {
   }
 
   return false;
+}
+
+/**
+ * A tool is safe to *re-run after it has already started* only if it is read-only
+ * or declares itself idempotent. For every other tool a failure mid/after execution
+ * must be assumed to have caused a partial, possibly-irreversible external
+ * side-effect (e.g. an on-chain escrow tx), so a blind retry would double-execute.
+ */
+export function isIdempotentTool<T>(tool: ToolDefinition<T>): boolean {
+  return tool.annotations?.readOnlyHint === true || tool.annotations?.idempotentHint === true;
+}
+
+/**
+ * Fix 1 (split-brain / double-execution): the idempotency record may be RELEASED
+ * (allowing a clean retry) only when we are certain no external side-effect occurred.
+ * That holds when the tool handler never started (`toolStarted === false`) or when
+ * the tool is idempotent by contract. Otherwise we must FENCE: keep the record
+ * (commitError) so an automatic retry cannot re-run a non-idempotent operation while
+ * its real-world effect is unknown. Durable exactly-once still requires tool-level
+ * nonce-pinning / check-before-write (tracked separately at the contract layer).
+ */
+export function canReleaseIdempotency<T>(tool: ToolDefinition<T>, toolStarted: boolean): boolean {
+  if (!toolStarted) return true;
+  return isIdempotentTool(tool);
 }
 
 function makeToolErrorResult(prefix: string, error: unknown): ToolResult {
@@ -313,8 +338,26 @@ async function waitForTaskStoreInput(
   requestKey = "default",
   signal?: AbortSignal,
 ): Promise<unknown> {
+  const pollDelayMs = Math.min(1000, ENV.MCP_TASK_POLL_INTERVAL_MS);
+  let consecutiveStoreErrors = 0;
+  const MAX_STORE_ERRORS = 10;
   while (!signal?.aborted) {
-    const task = await globalTaskStore.getTask(taskId);
+    let task;
+    try {
+      task = await globalTaskStore.getTask(taskId);
+      consecutiveStoreErrors = 0;
+    } catch (error) {
+      // Fix 3: a transient store blip (e.g. Redis failover) must not kill a
+      // long-running task that is parked waiting for client input. Skip this poll and
+      // retry; give up only after repeated failures so a permanent outage still ends.
+      if (!isTransientError(error)) throw error;
+      consecutiveStoreErrors += 1;
+      if (consecutiveStoreErrors >= MAX_STORE_ERRORS) {
+        throw new Error(`[KARMA] Task ${taskId} store unavailable while waiting for input.`, { cause: error });
+      }
+      await new Promise(resolve => setTimeout(resolve, pollDelayMs));
+      continue;
+    }
     if (!task) throw new Error(`[KARMA] Task ${taskId} expired while waiting for input.`);
     if (task.status === "cancelled") throw new TaskCancelledError(taskId, task.cancelReason || "cancelled");
     if (task.lastClientInput?.inputRequestId === inputRequestId && task.lastClientInput.inputResponses) {
@@ -322,7 +365,7 @@ async function waitForTaskStoreInput(
         ? task.lastClientInput.inputResponses[requestKey]
         : task.lastClientInput.inputResponses;
     }
-    await new Promise(resolve => setTimeout(resolve, Math.min(1000, ENV.MCP_TASK_POLL_INTERVAL_MS)));
+    await new Promise(resolve => setTimeout(resolve, pollDelayMs));
   }
   throw (signal?.reason || new TaskCancelledError(taskId));
 }
@@ -498,11 +541,15 @@ export function registerTools<T = Record<string, unknown>>(
           const taskId = task.taskId;
           const taskController = new AbortController();
 
-          const taskPromise = globalExecutionLockManager.withTenantLock(tenantId, async (lockSignal) => {
+          // Fix 4 (ADR-006): pass a thunk so TaskTracker decides whether to START the
+          // work under the drain gate, instead of receiving an already-running promise.
+          const startTask = () => globalExecutionLockManager.withTenantLock(tenantId, async (lockSignal) => {
             const unregisterTask = globalNativeTaskRuntime.register(taskId, taskController);
             const stopHeartbeat = startIdempotencyHeartbeat(idempotencyKey);
             const signals = [lockSignal, taskController.signal].filter(Boolean) as AbortSignal[];
             const combinedSignal = signals.length > 0 ? (signals.length === 1 ? signals[0] : AbortSignal.any(signals)) : undefined;
+            // Fix 1: once the handler starts, a non-idempotent side-effect may exist.
+            let toolStarted = false;
             try {
               const state = await getState(tenantId, { reload: true });
               const taskExecutionContext: ToolExecutionContext = {
@@ -554,6 +601,7 @@ export function registerTools<T = Record<string, unknown>>(
                   return input;
                 },
               };
+              toolStarted = true;
               const result = await executeTool(tool, cleanArgs, state, combinedSignal, taskExecutionContext);
               const latestTask = await globalTaskStore.getTask(taskId);
               if (latestTask?.status === "cancelled") {
@@ -581,9 +629,33 @@ export function registerTools<T = Record<string, unknown>>(
                 return;
               }
 
+              // Fix 1: a started, non-idempotent tool may have left an irreversible
+              // external side-effect (e.g. an on-chain escrow tx). Releasing the
+              // idempotency record would let an automatic retry double-execute it, so
+              // we only release when we are certain nothing happened.
+              const mayRelease = canReleaseIdempotency(tool, toolStarted);
+              const fenceTask = async (logEvent: string): Promise<void> => {
+                const errorResult = makeToolErrorResult(
+                  "[KARMA] Task interrupted after a side-effect may have occurred; manual reconciliation required before retry",
+                  error,
+                );
+                await globalIdempotencyManager.commitError(idempotencyKey, errorResult, ENV.MCP_IDEMPOTENCY_ERROR_TTL_SECONDS);
+                await globalTaskStore.updateTask(taskId, {
+                  status: "failed",
+                  result: errorResult,
+                  error: String(error),
+                  ttlSeconds: ENV.MCP_IDEMPOTENCY_ERROR_TTL_SECONDS,
+                });
+                await telemetry.log(logEvent, { ...telemetryBase, taskId, error: String(error) });
+              };
+
               if (isExecutionLockError(error)) {
-                await globalIdempotencyManager.release(idempotencyKey);
-                await globalTaskStore.deleteTask(taskId);
+                if (mayRelease) {
+                  await globalIdempotencyManager.release(idempotencyKey);
+                  await globalTaskStore.deleteTask(taskId);
+                } else {
+                  await fenceTask("task_fenced_lock_lost");
+                }
                 await finishSpan("ERROR", { taskId, error: String(error), "mcp.task.status": "lock_lost" });
                 throw error;
               }
@@ -593,10 +665,15 @@ export function registerTools<T = Record<string, unknown>>(
               await telemetry.log("task_failed", { ...telemetryBase, ...spanMeta, taskId, error: String(error) });
 
               if (isTransientError(error)) {
-                // Release so the caller can resubmit - transient infra failure, not a logic bug.
-                await globalIdempotencyManager.release(idempotencyKey);
-                await globalTaskStore.deleteTask(taskId);
-                await telemetry.log("task_transient_release", { ...telemetryBase, taskId, error: String(error) });
+                if (mayRelease) {
+                  // Release so the caller can resubmit - transient infra failure with no side-effect.
+                  await globalIdempotencyManager.release(idempotencyKey);
+                  await globalTaskStore.deleteTask(taskId);
+                  await telemetry.log("task_transient_release", { ...telemetryBase, taskId, error: String(error) });
+                } else {
+                  // Transient failure AFTER a non-idempotent side-effect started: fence, never release.
+                  await fenceTask("task_fenced_transient");
+                }
               } else {
                 // Permanent failure: commit with a short error TTL (not the full result TTL).
                 const errorResult = makeToolErrorResult("[KARMA] Task Failed", error);
@@ -617,7 +694,7 @@ export function registerTools<T = Record<string, unknown>>(
               unregisterTask();
             }
           });
-          if (!globalTaskTracker.track(taskPromise, ENV.MCP_TOOL_TIMEOUT_MS + 60000)) {
+          if (!globalTaskTracker.track(startTask, ENV.MCP_TOOL_TIMEOUT_MS + 60000)) {
             await globalIdempotencyManager.release(idempotencyKey);
             await globalTaskStore.deleteByIdempotencyKey(idempotencyKey);
             taskController.abort(new TaskCancelledError(taskId, "server draining"));
@@ -640,8 +717,11 @@ export function registerTools<T = Record<string, unknown>>(
         return await globalExecutionLockManager.withTenantLock(tenantId, async (lockSignal) => {
           const signals = [requestSignal, lockSignal].filter(Boolean) as AbortSignal[];
           const combinedSignal = signals.length > 0 ? (signals.length === 1 ? signals[0] : AbortSignal.any(signals)) : undefined;
+          // Fix 1: once the handler starts, a non-idempotent side-effect may exist.
+          let toolStarted = false;
           try {
             const state = await getState(tenantId, { reload: true });
+            toolStarted = true;
             const result = await executeTool(tool, cleanArgs, state, combinedSignal);
             await saveState(state);
             await globalIdempotencyManager.commit(idempotencyKey, result);
@@ -653,13 +733,18 @@ export function registerTools<T = Record<string, unknown>>(
             await telemetry.log("tool_execution_failed", { ...telemetryBase, ...spanMeta, error: String(error) });
 
             if (isExecutionLockError(error) || isTransientError(error)) {
-              await globalIdempotencyManager.release(idempotencyKey);
-              await telemetry.log("tool_execution_transient_release", { ...telemetryBase, error: String(error) });
-              throw error;
+              if (canReleaseIdempotency(tool, toolStarted)) {
+                await globalIdempotencyManager.release(idempotencyKey);
+                await telemetry.log("tool_execution_transient_release", { ...telemetryBase, error: String(error) });
+                throw error;
+              }
+              // Fix 1: a non-idempotent side-effect may have started; do NOT release.
+              // Fall through to commitError so a blind retry cannot double-execute it.
+              await telemetry.log("tool_execution_fenced", { ...telemetryBase, error: String(error) });
             }
 
-            // Permanent sync failure: cache a short-lived error result so exact
-            // duplicate retries do not re-run non-idempotent app logic forever.
+            // Permanent sync failure (or fenced transient): cache a short-lived error
+            // result so exact duplicate retries do not re-run non-idempotent app logic.
             await globalIdempotencyManager.commitError(
               idempotencyKey,
               makeToolErrorResult("[KARMA] Tool Failed", error),

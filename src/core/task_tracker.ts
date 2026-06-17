@@ -12,16 +12,31 @@ export class TaskTracker {
     return this.draining;
   }
 
-  track(promise: Promise<unknown>, hardTimeoutMs: number = ENV.MCP_TOOL_TIMEOUT_MS + 60000): boolean {
+  /**
+   * Fix 4 (ADR-006): accepts a *thunk*, not an already-running promise, so the
+   * draining check and the decision to start the work are atomic — when the server
+   * is draining the operation is never started (closes the track-after-start TOCTOU).
+   * The caller is responsible for cleaning up any pre-created handles on a `false`.
+   */
+  track(start: () => Promise<unknown>, hardTimeoutMs: number = ENV.MCP_TOOL_TIMEOUT_MS + 60000): boolean {
     if (this.draining) {
       return false;
     }
 
+    // Fix 4: hold the timer handle so it can be cleared once the task settles.
+    // Previously the setTimeout was never cleared, leaking one timer + the rejected
+    // promise closure per task for the full hardTimeoutMs (default ~6 min).
+    let timer: NodeJS.Timeout | undefined;
     const safePromise = Promise.race([
-      promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`Task Hard Timeout (${hardTimeoutMs}ms)`)), hardTimeoutMs))
+      start(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Task Hard Timeout (${hardTimeoutMs}ms)`)), hardTimeoutMs);
+        timer.unref?.();
+      })
     ]).catch(err => {
       console.error("[KARMA] Background Task cancelled due to timeout or error:", err);
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
     });
 
     this.activeTasks.add(safePromise);

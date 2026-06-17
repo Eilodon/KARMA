@@ -6,9 +6,15 @@
  * surface changes without a matching update here.
  */
 export const agentSkillRegistryAbi = [
+  // ── constructor (review window is deploy-time config, then immutable) ──
+  { type: "constructor", stateMutability: "nonpayable", inputs: [{ name: "reviewWindowSecs", type: "uint256" }] },
+
   // ── constants ──
   { type: "function", name: "BASE_REPUTATION", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "DEFAULT_REVIEW_WINDOW", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { type: "function", name: "MAX_REPUTATION", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "MAX_REVIEW_WINDOW", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "MIN_REVIEW_WINDOW", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { type: "function", name: "REPUTATION_STEP", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { type: "function", name: "REVIEW_WINDOW", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
 

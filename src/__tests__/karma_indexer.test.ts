@@ -67,6 +67,94 @@ describe("P4.3 SkillEventIndexer", () => {
   });
 });
 
+describe("SkillEventIndexer — DoS hardening (KARMA-PH1-001)", () => {
+  const instantSleep = () => Promise.resolve();
+
+  function rig(opts: {
+    fromBlock: bigint;
+    head: bigint;
+    getLogs: ReturnType<typeof vi.fn>;
+    maxBlockRange?: bigint;
+    maxReconnectAttempts?: number;
+  }) {
+    let captured: { onLogs: (e: IndexedEvent[]) => void; onError: (err: unknown) => void } | undefined;
+    const unwatch = vi.fn();
+    const watch = vi.fn((h: NonNullable<typeof captured>) => { captured = h; return unwatch; });
+    const getBlockNumber = vi.fn().mockResolvedValue(opts.head);
+    const events: IndexedEvent[] = [];
+    const deps: IndexerDeps = {
+      getBlockNumber,
+      getLogs: opts.getLogs as unknown as IndexerDeps["getLogs"],
+      watch,
+      now: () => 1000,
+      sleep: instantSleep, // never actually wait during backoff
+      maxBlockRange: opts.maxBlockRange,
+      maxReconnectAttempts: opts.maxReconnectAttempts,
+    };
+    const indexer = new SkillEventIndexer(deps, (e) => events.push(e), opts.fromBlock);
+    return { indexer, watch, getBlockNumber, getLogs: opts.getLogs, events, fire: () => captured! };
+  }
+
+  it("paginates backfill into bounded maxBlockRange windows (so eth_getLogs never spans a huge range)", async () => {
+    const getLogs = vi.fn().mockResolvedValue([]);
+    const h = rig({ fromBlock: 0n, head: 5000n, getLogs, maxBlockRange: 2000n });
+    await h.indexer.start();
+    expect(getLogs.mock.calls).toEqual([[0n, 2000n], [2001n, 4001n], [4002n, 5000n]]);
+    expect(h.indexer.health().lastIndexedBlock).toBe("5000");
+    expect(h.indexer.health().watching).toBe(true);
+  });
+
+  it("start() does NOT reject when the initial (genesis) backfill fails — it self-heals via reconnect", async () => {
+    const getLogs = vi.fn()
+      .mockRejectedValueOnce(new Error("eth_getLogs: query returned more than 10000 results"))
+      .mockResolvedValue([]);
+    const h = rig({ fromBlock: 0n, head: 100n, getLogs });
+    // The crux of KARMA-PH1-001: a failed backfill must never escape as an unhandled rejection.
+    await expect(h.indexer.start()).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(h.indexer.health().watching).toBe(true));
+    expect(h.indexer.health().lastError).toBeNull();
+  });
+
+  it("reconnect retries with backoff and recovers after a transient getLogs failure", async () => {
+    const getLogs = vi.fn()
+      .mockResolvedValueOnce([])                       // initial backfill ok
+      .mockRejectedValueOnce(new Error("read ECONNRESET")) // first reconnect attempt fails
+      .mockResolvedValue([]);                          // retry succeeds
+    const h = rig({ fromBlock: 100n, head: 200n, getLogs });
+    await h.indexer.start();
+    h.getBlockNumber.mockResolvedValue(300n);
+    h.fire().onError(new Error("ws closed"));
+    await vi.waitFor(() => expect(h.watch).toHaveBeenCalledTimes(2));
+    expect(h.indexer.health().watching).toBe(true);
+    expect(h.indexer.health().lastError).toBeNull();
+    expect(h.indexer.health().reconnectAttempts).toBe(0);
+  });
+
+  it("persistent RPC failure parks degraded (watching=false, lastError set) — never an unhandled rejection", async () => {
+    const getLogs = vi.fn()
+      .mockResolvedValueOnce([])                 // initial backfill ok → watching
+      .mockRejectedValue(new Error("RPC down")); // every reconnect attempt fails
+    const h = rig({ fromBlock: 100n, head: 200n, getLogs, maxReconnectAttempts: 3 });
+    await h.indexer.start();
+    h.fire().onError(new Error("ws closed"));
+    await vi.waitFor(() => expect(h.indexer.health().reconnectAttempts).toBe(3));
+    const hp = h.indexer.health();
+    expect(hp.watching).toBe(false);
+    expect(hp.lastError).toContain("RPC down");
+  });
+
+  it("stop() halts the reconnect loop (stopped guard)", async () => {
+    const getLogs = vi.fn().mockResolvedValueOnce([]).mockRejectedValue(new Error("RPC down"));
+    const h = rig({ fromBlock: 100n, head: 200n, getLogs, maxReconnectAttempts: 1000 });
+    await h.indexer.start();
+    h.indexer.stop();
+    h.fire().onError(new Error("ws closed")); // reconnect should early-return because stopped
+    await Promise.resolve();
+    expect(h.indexer.health().watching).toBe(false);
+    expect(h.indexer.health().reconnectAttempts).toBe(0); // never entered the retry loop
+  });
+});
+
 describe("mapLog (raw viem log → IndexedEvent)", () => {
   const raw = (eventName: string, args: Record<string, unknown>, blockNumber: bigint | null = 5n) =>
     ({ eventName, args, blockNumber });

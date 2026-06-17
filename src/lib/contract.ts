@@ -222,12 +222,26 @@ export interface IndexerDeps {
   getLogs: (fromBlock: bigint, toBlock: bigint) => Promise<IndexedEvent[]>;
   watch: (handlers: IndexerWatchHandlers) => () => void;
   now?: () => number;
+  /**
+   * Max blocks per getLogs call. A catch-up after long downtime — or the genesis backfill
+   * (fromBlock=0) — can span a range larger than the RPC provider's eth_getLogs limit; chunking
+   * keeps every request bounded so the call never rejects purely on range size. Default 2000.
+   */
+  maxBlockRange?: bigint;
+  /** Backoff sleeper between reconnect attempts (injectable so tests don't actually wait). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Cap on reconnect retries before parking degraded. Default Infinity (self-heal forever). */
+  maxReconnectAttempts?: number;
 }
 
 export interface IndexerHealth {
   watching: boolean;
   lastIndexedBlock: string; // stringified bigint (D-6)
   lastEventAt: number | null;
+  /** Last reconnect/backfill error message, or null when healthy. Surfaced for ops (DoS visibility). */
+  lastError: string | null;
+  /** Consecutive failed reconnect attempts since the last successful (re)subscribe. */
+  reconnectAttempts: number;
 }
 
 export class SkillEventIndexer {
@@ -236,6 +250,18 @@ export class SkillEventIndexer {
   private watching = false;
   private unwatch?: () => void;
   private readonly now: () => number;
+  private readonly maxBlockRange: bigint;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly maxReconnectAttempts: number;
+  // Reconnect resilience (DoS hardening, KARMA-PH1-001): a failed (re)backfill must NEVER escape
+  // as an unhandled rejection — KARMA runs in-process (D-1), so an unhandled rejection would crash
+  // the whole host. reconnect() therefore catches, backs off, and retries instead of rethrowing.
+  private reconnecting = false;
+  private stopped = false;
+  private lastError: string | null = null;
+  private reconnectAttempts = 0;
+  private static readonly BACKOFF_BASE_MS = 1_000;
+  private static readonly BACKOFF_MAX_MS = 30_000;
 
   constructor(
     private readonly deps: IndexerDeps,
@@ -244,19 +270,38 @@ export class SkillEventIndexer {
   ) {
     this.lastIndexedBlock = fromBlock;
     this.now = deps.now ?? Date.now;
+    this.maxBlockRange = deps.maxBlockRange && deps.maxBlockRange > 0n ? deps.maxBlockRange : 2000n;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.maxReconnectAttempts = deps.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
   }
 
   async start(): Promise<void> {
-    await this.backfill();
-    this.subscribe();
+    try {
+      await this.backfill();
+      this.subscribe();
+    } catch (err) {
+      // Initial backfill failed (oversized range, RPC down, …). Do NOT throw — callers fire this
+      // with `void`, so a rejection would be unhandled and crash the host. Fall into the same
+      // resilient reconnect/backoff loop the live watcher uses, so the indexer self-heals.
+      await this.reconnect(err);
+    }
   }
 
+  // Backfill is paginated: getLogs(from, to) is issued in windows of at most maxBlockRange,
+  // advancing (and persisting) lastIndexedBlock after each window so a mid-backfill failure
+  // resumes from the last good chunk instead of re-scanning from the start. BM25 upsert is
+  // idempotent, so the inclusive lower bound (a 1-block overlap across restarts) is harmless.
   private async backfill(): Promise<void> {
     const head = await this.deps.getBlockNumber();
     if (head < this.lastIndexedBlock) return; // chain reorg/empty — nothing new
-    const logs = await this.deps.getLogs(this.lastIndexedBlock, head);
-    for (const e of logs) this.process(e);
-    if (head > this.lastIndexedBlock) this.lastIndexedBlock = head;
+    let from = this.lastIndexedBlock;
+    while (from <= head) {
+      const to = head - from > this.maxBlockRange ? from + this.maxBlockRange : head;
+      const logs = await this.deps.getLogs(from, to);
+      for (const e of logs) this.process(e);
+      if (to > this.lastIndexedBlock) this.lastIndexedBlock = to;
+      from = to + 1n;
+    }
   }
 
   private subscribe(): void {
@@ -264,16 +309,48 @@ export class SkillEventIndexer {
       onLogs: (events) => {
         for (const e of events) this.process(e);
       },
-      onError: (err) => void this.reconnect(err),
+      // reconnect() is self-contained (never rejects); the extra .catch is belt-and-suspenders so
+      // a future change can't turn this fire-and-forget into a host-crashing unhandled rejection.
+      onError: (err) => void this.reconnect(err).catch((e) => console.error("[KARMA] indexer reconnect crashed:", e)),
     });
     this.watching = true;
   }
 
-  private async reconnect(_err: unknown): Promise<void> {
+  // Resilient reconnect: re-backfill the gap then re-watch, retrying with capped exponential
+  // backoff. Any rejection is caught and retried, NEVER rethrown. Overlapping calls are coalesced
+  // via `reconnecting`; stop() breaks the loop. With the default (Infinity) cap it self-heals as
+  // soon as the RPC recovers; a finite cap (tests / strict ops) parks degraded but still alive.
+  private async reconnect(err: unknown): Promise<void> {
+    if (this.reconnecting || this.stopped) return;
+    this.reconnecting = true;
     this.watching = false;
     this.unwatch?.();
-    await this.backfill();
-    this.subscribe();
+    this.unwatch = undefined;
+    this.lastError = err instanceof Error ? err.message : String(err);
+    try {
+      for (let attempt = 1; !this.stopped && attempt <= this.maxReconnectAttempts; attempt += 1) {
+        try {
+          await this.backfill();
+          this.subscribe();
+          this.lastError = null;
+          this.reconnectAttempts = 0;
+          return;
+        } catch (retryErr) {
+          this.lastError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          this.reconnectAttempts = attempt;
+          const delay = Math.min(
+            SkillEventIndexer.BACKOFF_BASE_MS * 2 ** (attempt - 1),
+            SkillEventIndexer.BACKOFF_MAX_MS,
+          );
+          await this.sleep(delay);
+        }
+      }
+      // Only reachable with a finite cap: the retry budget is spent. Park degraded (watching=false,
+      // lastError set for karma_health) but alive — the host keeps serving the rest of its tools.
+      console.error(`[KARMA] indexer reconnect gave up after ${this.reconnectAttempts} attempts: ${this.lastError}`);
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   private process(e: IndexedEvent): void {
@@ -283,7 +360,9 @@ export class SkillEventIndexer {
   }
 
   stop(): void {
+    this.stopped = true;
     this.unwatch?.();
+    this.unwatch = undefined;
     this.watching = false;
   }
 
@@ -292,6 +371,8 @@ export class SkillEventIndexer {
       watching: this.watching,
       lastIndexedBlock: this.lastIndexedBlock.toString(),
       lastEventAt: this.lastEventAt,
+      lastError: this.lastError,
+      reconnectAttempts: this.reconnectAttempts,
     };
   }
 }
@@ -366,11 +447,18 @@ export function buildViemIndexerDeps(client: IndexerEventClient, address: `0x${s
   };
 }
 
+/** Default eth_getLogs window when KARMA_INDEXER_BLOCK_RANGE is unset (safe for typical RPC limits). */
+const DEFAULT_INDEXER_BLOCK_RANGE = 2000n;
+
 /** Production wiring of the indexer over the real Pharos clients; starts immediately. */
 export function startSkillIndexer(onEvent: (e: IndexedEvent) => void, fromBlock = 0n): SkillEventIndexer {
   // The viem PublicClient satisfies IndexerEventClient structurally — no cast needed.
-  const deps = buildViemIndexerDeps(getPublicClient(), getContractAddress());
+  const rawRange = Number(process.env.KARMA_INDEXER_BLOCK_RANGE);
+  const maxBlockRange = Number.isFinite(rawRange) && rawRange > 0 ? BigInt(Math.floor(rawRange)) : DEFAULT_INDEXER_BLOCK_RANGE;
+  const deps: IndexerDeps = { ...buildViemIndexerDeps(getPublicClient(), getContractAddress()), maxBlockRange };
   const indexer = new SkillEventIndexer(deps, onEvent, fromBlock);
-  void indexer.start();
+  // start() is internally resilient (its own catch → reconnect loop); the .catch is a final guard so
+  // this fire-and-forget can never surface as a host-crashing unhandled rejection (in-process, D-1).
+  void indexer.start().catch((err) => console.error("[KARMA] indexer start crashed:", err));
   return indexer;
 }

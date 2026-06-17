@@ -10,6 +10,20 @@ export interface IExecutionLockManager {
 
 const localQueues = new Map<string, Promise<unknown>>();
 
+/**
+ * Fix 3: a transient Redis blip (failover, brief network drop, replica promotion)
+ * during lock acquisition should be retried within the acquire deadline rather than
+ * aborting the whole attempt. Permanent errors (auth, script syntax) rethrow at once.
+ */
+function isRetriableRedisError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code && ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "EAI_AGAIN"].includes(code)) {
+    return true;
+  }
+  const message = String(error instanceof Error ? error.message : error);
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket|connection|timed? ?out|timeout|stream isn't writeable|connection is closed|max retries|READONLY/i.test(message);
+}
+
 async function enqueueLocal<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {
   const previous = localQueues.get(tenantId) || Promise.resolve();
   const next = previous.catch(() => undefined).then(operation);
@@ -50,7 +64,16 @@ export class RedisExecutionLockManager implements IExecutionLockManager {
       const deadline = Date.now() + this.acquireDeadlineMs;
 
       while (Date.now() < deadline) {
-        const acquired = await this.redis.set(key, token, "PX", this.ttlMs, "NX");
+        let acquired: string | null;
+        try {
+          acquired = await this.redis.set(key, token, "PX", this.ttlMs, "NX");
+        } catch (error) {
+          // Fix 3: keep retrying within the acquire deadline on a transient blip;
+          // rethrow a permanent error immediately rather than spinning until deadline.
+          if (!isRetriableRedisError(error)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 100));
+          continue;
+        }
         if (acquired === "OK") {
           let stopped = false;
           let consecutiveHeartbeatFailures = 0;
@@ -106,13 +129,22 @@ export class RedisExecutionLockManager implements IExecutionLockManager {
           } finally {
             stopped = true;
             clearInterval(heartbeat);
-            const releaseScript = `
-              if redis.call('GET', KEYS[1]) == ARGV[1] then
-                return redis.call('DEL', KEYS[1])
-              end
-              return 0
-            `;
-            await this.redis.eval(releaseScript, 1, key, token).catch(() => undefined);
+            // Fix 2: only release the lock on a clean exit. `controller` is aborted
+            // solely by abortLock (lock lost / heartbeat failed repeatedly). In that
+            // case the operation may still be running as an orphan we cannot kill, so
+            // deleting the key would let a concurrent op acquire it and run alongside
+            // the orphan — breaking tenant mutual-exclusion. Leave the key to expire by
+            // its TTL instead. The DEL is token-checked, so a clean exit never deletes a
+            // lock that already rolled over to another owner.
+            if (!controller.signal.aborted) {
+              const releaseScript = `
+                if redis.call('GET', KEYS[1]) == ARGV[1] then
+                  return redis.call('DEL', KEYS[1])
+                end
+                return 0
+              `;
+              await this.redis.eval(releaseScript, 1, key, token).catch(() => undefined);
+            }
           }
         }
         await new Promise(resolve => setTimeout(resolve, 100));

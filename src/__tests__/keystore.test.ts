@@ -68,6 +68,22 @@ describe("KeystoreManager — Web3 Secret Storage v3 (scrypt)", () => {
     await km.load(rtPath, "pw123");
     expect(km.getAddress("rt")).toBe(privateKeyToAccount(KNOWN_PK).address);
   });
+
+  it("unload() drops one agent's key (offboarding, DEBT-007); clear() drops all", async () => {
+    const km = new KeystoreManager();
+    await km.load(fixturePath, "testpassword");
+    expect(km.has("vector")).toBe(true);
+
+    expect(km.unload("vector")).toBe(true);
+    expect(km.unload("vector")).toBe(false); // already gone
+    expect(km.has("vector")).toBe(false);
+    expect(() => km.getAddress("vector")).toThrow(/Agent not found/i);
+
+    await km.load(fixturePath, "testpassword");
+    expect(km.list()).toContain("vector");
+    km.clear();
+    expect(km.list()).toEqual([]);
+  });
 });
 
 describe("KeystoreManager tenant binding (A1, STRIDE-S)", () => {
