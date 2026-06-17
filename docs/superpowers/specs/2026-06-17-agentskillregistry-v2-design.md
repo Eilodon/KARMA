@@ -2,10 +2,10 @@
 title: AgentSkillRegistry v2 — escrow dispute resolution, O(1) dedup, on-chain trust gate
 date: 2026-06-17
 author: KARMA team — gokuderafight@gmail.com
-SPEC_APPROVED: false
+SPEC_APPROVED: true
 SPEC_ESCALATION: false
 ESCALATION_FINDING: ""
-status: DESIGN-LOCKED · DEFERRED (redeploy-gated) — execute after Workstream A
+status: APPROVED — implement Solidity + Foundry + TS lockstep now; live redeploy remains operator-gated
 related:
   - "Workstream A: 2026-06-17-app-layer-stride-hardening-design.md"
   - "PD-003 (O(1) dedup), PD-005 (on-chain trust gate)"
@@ -122,4 +122,82 @@ at BASE 50); self-deal (requester==provider) earns no rep; `setMinReputation` ow
   scope; recorded in PD-005).
 - Repurposing `deadline` for the review window is a semantic overload — must be covered by an
   explicit comment + tests so a future reader doesn't treat it as the original create deadline.
+
+## Risk Assessment (audit-design)
+<!-- audit-design: DO NOT DUPLICATE — update this section, do not append a second one -->
+<!-- last-run: 2026-06-17 | trigger: NORMAL -->
+
+**Tier:** 3 (on-chain escrow / payments + multi-tenant + immutable-contract migration) | **Date:** 2026-06-17
+
+### Failure Modes
+1. **`deadline` field overload corrupts the refund path** — `claimRefund` still reads `j.deadline`
+   for the Open-state "provider never delivered" refund, but `deliverResult` now OVERWRITES
+   `j.deadline = now + REVIEW_WINDOW`. If any ordering/guard is wrong, a job could become refundable
+   on the wrong clock, or the Open refund and the Delivered review windows could interfere. —
+   **HIGH** — mitigation in plan: YES
+2. **Storage-layout / ABI drift between contract v2 and the TS lockstep** — adding
+   `minReputationToInvoke` to the `Skill` struct reshapes the `skills()` tuple; `karma_service.ts`
+   decodes tuples positionally (`t[5]`, `t[7]`…). A wrong index silently mis-maps reputation/active/
+   threshold with no compile error. The ABI drift-guard must catch shape drift, and decode tests must
+   pin positions. — **HIGH** — mitigation in plan: YES
+3. **Migration leaves in-flight v1 jobs unsettleable or double-counts reputation** — redeploy points
+   `PHAROS_CONTRACT_ADDRESS` at v2 with empty state; escrow locked in v1 Open/Delivered jobs is
+   invisible to v2. If the indexer re-points before v1 jobs drain, funds appear lost and reputation
+   re-bootstraps. — **HIGH (ops)** — mitigation in plan: YES (runbook: dual-read until drained)
+
+### Layer Signals
+- **L1 Logic:** new state transitions must each be guarded: `disputeResult` only `Delivered &&
+  now <= deadline`; `claimAfterReview` only `Delivered && now > deadline`; `confirmCompletion` any
+  time while `Delivered`. The boundary (`now == deadline`) must be tested (mirror existing
+  `test_Refund_AtExactDeadline_Reverts`).
+- **L2 Concurrency:** `nonReentrant` already guards withdraw; `disputeResult`/`claimAfterReview` only
+  credit `pendingWithdrawals` (no external call) so they need no reentrancy guard, but confirm they
+  never `.call` value directly.
+- **L3 Data:** `agentReputation` lazy-init via `_agentRep[a]==0 ? BASE : _agentRep[a]` is correct
+  ONLY because reputation never drops below BASE; a future decay feature would break the sentinel.
+  Document the invariant. `minReputationToInvoke` default 0 = no gate (back-compat with v1 semantics).
+- **L5 Security:** `setMinReputation` owner-only (mirror `deactivateSkill`'s `s.owner == msg.sender`).
+  `createJob` gate must read `agentReputation(msg.sender)` (the lazy getter), NOT the raw mapping
+  (raw is 0 for a fresh agent → would block everyone at any threshold > 0).
+- **L6 Observability:** new events `ResultDisputed` (+ reuse `JobRefunded`/`JobCompleted`) so the
+  indexer and social graph can show dispute/auto-claim outcomes; without them the off-chain view
+  silently diverges.
+- **L7 Cross-cutting (L7.11 = YES):** real escrow value + multi-tenant. The app-layer Trust Gate
+  (Phase 1) must stay as a pre-broadcast fast-fail and be reconciled with the now-authoritative
+  on-chain gate (simulate already reverts pre-broadcast — surface it cleanly, don't double-charge).
+
+### Assumptions to Verify
+- **ASSUMED:** `confirmCompletion` is still allowed for the requester at ANY time while `Delivered`
+  (even after `deadline`), so a good-faith requester is never forced into the auto-claim path. Verify
+  no `now <= deadline` guard is accidentally added to `confirmCompletion`.
+- **ASSUMED:** repurposing `deadline` does not break `claimRefund` — because once `status !=
+  Open`, `claimRefund` reverts on the status check BEFORE reading `deadline`. Verify the status guard
+  precedes the deadline read (it does in v1: `require(status==Open)` then `require(now>deadline)`).
+- **ASSUMED:** Multicall3 still OFF (CONTEXT.md / contract.ts) — v2 adds no multicall dependency.
+
+### Abductive Hypotheses
+- **Abductive 1 (interaction):** The app-layer Phase-1 Trust Gate reads index-derived reputation
+  (max owned-skill rep) while the on-chain gate reads `agentReputation` (base-50 earned-on-completion).
+  These two metrics DISAGREE — a requester the app allows could be reverted on-chain (or vice-versa),
+  producing a confusing "app says ok, chain says no" or a wasted simulate. Plan must reconcile:
+  demote the app gate to advisory/preflight and treat the on-chain revert as authoritative.
+- **Abductive 2 (adversarial):** A provider who is ALSO the requester (self-job) could farm via
+  `claimAfterReview` to bump `agentReputation` if the `requester != provider` guard is only applied
+  in `confirmCompletion` and forgotten in `claimAfterReview`. Both completion paths must apply the
+  self-deal guard identically. — **HIGH**
+
+### Gate Result
+<!-- PASS | PASS WITH FLAGS | HOLD -->
+**PASS WITH FLAGS** — proceed to writing-plans. The plan MUST include:
+- **(FM1/HIGH)** keep `claimRefund`'s `require(status==Open)` BEFORE the deadline read; Foundry tests
+  for: Open-refund still works post-change, and a Delivered job is never refundable via `claimRefund`.
+- **(FM2/HIGH)** update the ABI drift-guard for the new `skills()` tuple + functions/events; add a
+  decode test pinning each `skills()` tuple index incl. the new `minReputationToInvoke`.
+- **(FM3/HIGH-ops)** migration runbook: dual-read v1+v2 until v1 jobs drain before re-pointing the
+  indexer; redeploy/migration stays operator-gated (not run in this cycle).
+- **(Abductive-1)** reconcile the app Phase-1 gate with the on-chain gate (app = advisory preflight;
+  chain = authoritative); a Foundry + a TS test that the two agree on the bootstrap case.
+- **(Abductive-2/HIGH)** apply the `requester != provider` reputation guard in BOTH
+  `confirmCompletion` AND `claimAfterReview`; Foundry self-deal no-farm test on both paths.
+- **(L1)** boundary test at `now == deadline` for both `disputeResult` and `claimAfterReview`.
 </content>

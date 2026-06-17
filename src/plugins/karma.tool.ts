@@ -220,6 +220,7 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         description: a.description,
         mcpEndpoint: a.mcpEndpoint,
         pricePerCall: BigInt(a.pricePerCallWei),
+        minReputationToInvoke: BigInt(a.minReputationToInvoke), // v2: authoritative on-chain threshold
       });
       if (outcome.status === "pending" || skillId == null) {
         return reply(`[KARMA] register_skill broadcast; receipt pending tx=${outcome.hash}`, {
@@ -306,12 +307,13 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
       const skill = await svc.readSkill(skillId);
       if (!skill.active) throw new Error(`[KARMA] skill #${skillId} is inactive`);
 
-      // Trust Gate (Phase 1, app-layer): reject before any escrow if the requester's reputation
-      // is below the owner-declared threshold. Advisory — a direct contract caller bypasses it;
-      // Phase 2 enforces this in createJob on-chain (see plan 2026-06-16-trust-gate-min-reputation).
-      const requiredReputation = svc.getSkillThreshold(skillId);
+      // Trust Gate (v2, on-chain authoritative): preflight against the SAME on-chain values the
+      // contract's createJob require checks (skill.minReputationToInvoke + agentReputation), so we
+      // reject before broadcasting a tx that would revert. The on-chain require is the source of truth;
+      // simulate() would also catch it, but this returns a structured reason without a wasted round-trip.
+      const requiredReputation = Number(skill.minReputationToInvoke);
       if (requiredReputation > 0) {
-        const requesterReputation = svc.getReputation(requester);
+        const requesterReputation = await svc.getAgentReputation(requester);
         if (requesterReputation < requiredReputation) {
           return reply(
             `[KARMA] create_job rejected: requester reputation ${requesterReputation} < required ` +
@@ -406,6 +408,52 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     },
   };
 
+  const disputeResult: ToolDefinition = {
+    name: "dispute_result",
+    description:
+      "Requester rejects a delivered result within the review window and reclaims the escrow " +
+      "(moves the job to Disputed). Reverts on-chain if the review window has already closed.",
+    inputSchema: { agentId: z.string().describe("Keystore agent id of the requester."), jobId: WEI },
+    capabilities: ["network"],
+    allowedPhases: [...PHASES],
+    annotations: writeAnnotations,
+    execution: { taskSupport: "forbidden" },
+    handler: async (args) => {
+      assertInProcess();
+      const a = z.object({ agentId: z.string(), jobId: WEI }).parse(args);
+      const { tenantId } = getRequestContext();
+      const outcome = await svc.disputeResult(svc.account(a.agentId, tenantId), { jobId: BigInt(a.jobId) });
+      return reply(`[KARMA] dispute_result job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
+        status: outcome.status,
+        jobId: a.jobId,
+        txHash: outcome.hash,
+      });
+    },
+  };
+
+  const claimAfterReview: ToolDefinition = {
+    name: "claim_after_review",
+    description:
+      "Provider claims payment for a delivered job after the review window closes and the requester " +
+      "neither confirmed nor disputed (anti-deadlock). Reverts on-chain while the window is still open.",
+    inputSchema: { agentId: z.string().describe("Keystore agent id of the provider."), jobId: WEI },
+    capabilities: ["network"],
+    allowedPhases: [...PHASES],
+    annotations: writeAnnotations,
+    execution: { taskSupport: "forbidden" },
+    handler: async (args) => {
+      assertInProcess();
+      const a = z.object({ agentId: z.string(), jobId: WEI }).parse(args);
+      const { tenantId } = getRequestContext();
+      const outcome = await svc.claimAfterReview(svc.account(a.agentId, tenantId), { jobId: BigInt(a.jobId) });
+      return reply(`[KARMA] claim_after_review job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
+        status: outcome.status,
+        jobId: a.jobId,
+        txHash: outcome.hash,
+      });
+    },
+  };
+
   const getAgentReputation: ToolDefinition = {
     name: "get_agent_reputation",
     description:
@@ -434,7 +482,7 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
           };
         }),
       );
-      const agentReputation = svc.getReputation(address);
+      const agentReputation = await svc.getAgentReputation(address); // v2: on-chain (the gate's source of truth)
       return reply(
         `[KARMA] agent ${address} owns ${skills.length} skill(s), reputation ${agentReputation}`,
         { address, agentReputation, skills },
@@ -550,6 +598,8 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     createJob,
     deliverResult,
     completeJob,
+    disputeResult,
+    claimAfterReview,
     getAgentReputation,
     querySocialGraph,
     getPendingBalance,

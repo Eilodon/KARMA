@@ -3,10 +3,8 @@ import { keystoreManager } from "./keystore.js";
 import { agentSkillRegistryAbi } from "./abi.js";
 import {
   deriveTaskHash,
-  findJobByTaskHash,
   getContractAddress,
   getPublicClient,
-  makeOnchainJobReader,
   writeContractBounded,
   type WriteOutcome,
 } from "./contract.js";
@@ -32,6 +30,7 @@ export interface OnchainSkill {
   totalInvocations: bigint;
   active: boolean;
   registeredAt: bigint;
+  minReputationToInvoke: bigint; // Trust Gate threshold (v2, on-chain)
 }
 
 export interface OnchainJob {
@@ -54,7 +53,7 @@ export interface KarmaService {
   addressOf(agentId: string, tenantId: string): Address;
   registerSkill(
     account: Account,
-    p: { name: string; description: string; mcpEndpoint: string; pricePerCall: bigint },
+    p: { name: string; description: string; mcpEndpoint: string; pricePerCall: bigint; minReputationToInvoke: bigint },
   ): Promise<{ skillId: bigint | null; outcome: WriteOutcome }>;
   readSkill(skillId: bigint): Promise<OnchainSkill>;
   readJob(jobId: bigint): Promise<OnchainJob>;
@@ -66,6 +65,14 @@ export interface KarmaService {
   ): Promise<{ jobId: bigint | null; outcome: WriteOutcome }>;
   deliverResult(account: Account, p: { jobId: bigint; resultHash: Hash }): Promise<WriteOutcome>;
   confirmCompletion(account: Account, p: { jobId: bigint }): Promise<WriteOutcome>;
+  /** Requester rejects a delivered result within the review window and reclaims escrow (v2). */
+  disputeResult(account: Account, p: { jobId: bigint }): Promise<WriteOutcome>;
+  /** Provider claims payment after the review window if the requester ghosted (v2). */
+  claimAfterReview(account: Account, p: { jobId: bigint }): Promise<WriteOutcome>;
+  /** Owner adjusts a skill's on-chain Trust Gate threshold (v2). */
+  setMinReputation(account: Account, p: { skillId: bigint; minReputation: number }): Promise<WriteOutcome>;
+  /** On-chain earned agent reputation (lazy base-50). Authoritative source for the Trust Gate (v2). */
+  getAgentReputation(addr: Address): Promise<number>;
   getAgentSkills(addr: Address): Promise<readonly bigint[]>;
   getProviderJobs(addr: Address): Promise<readonly bigint[]>;
   getRequesterJobs(addr: Address): Promise<readonly bigint[]>;
@@ -122,7 +129,7 @@ export const realKarmaService: KarmaService = {
   async registerSkill(account, p) {
     const outcome = await writeContractBounded(account, {
       functionName: "registerSkill",
-      args: [p.name, p.description, p.mcpEndpoint, p.pricePerCall],
+      args: [p.name, p.description, p.mcpEndpoint, p.pricePerCall, p.minReputationToInvoke],
     });
     return { skillId: extractId(outcome, "SkillRegistered", "skillId"), outcome };
   },
@@ -139,6 +146,7 @@ export const realKarmaService: KarmaService = {
       totalInvocations: t[6] as bigint,
       active: t[7] as boolean,
       registeredAt: t[8] as bigint,
+      minReputationToInvoke: t[9] as bigint,
     };
   },
 
@@ -159,7 +167,11 @@ export const realKarmaService: KarmaService = {
   },
 
   deriveTaskHash,
-  findExistingJob: (requester, taskHash) => findJobByTaskHash(requester, taskHash, makeOnchainJobReader()),
+  // PD-003 closed: O(1) on-chain lookup (taskHash already binds the requester; 0 = no existing job).
+  findExistingJob: async (_requester, taskHash) => {
+    const id = await read<bigint>("jobByTaskHash", [taskHash]);
+    return id === 0n ? null : id;
+  },
 
   async createJob(account, p) {
     const outcome = await writeContractBounded(account, {
@@ -175,6 +187,19 @@ export const realKarmaService: KarmaService = {
 
   confirmCompletion: (account, p) =>
     writeContractBounded(account, { functionName: "confirmCompletion", args: [p.jobId] }),
+
+  disputeResult: (account, p) =>
+    writeContractBounded(account, { functionName: "disputeResult", args: [p.jobId] }),
+
+  claimAfterReview: (account, p) =>
+    writeContractBounded(account, { functionName: "claimAfterReview", args: [p.jobId] }),
+
+  setMinReputation: (account, p) =>
+    writeContractBounded(account, { functionName: "setMinReputation", args: [p.skillId, BigInt(p.minReputation)] }),
+
+  async getAgentReputation(addr) {
+    return Number(await read<bigint>("agentReputation", [addr]));
+  },
 
   getAgentSkills: (addr) => read("getAgentSkills", [addr]),
   getProviderJobs: (addr) => read("getProviderJobs", [addr]),

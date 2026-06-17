@@ -21,6 +21,7 @@ const skill = (over: Partial<OnchainSkill> = {}): OnchainSkill => ({
   totalInvocations: 3n,
   active: true,
   registeredAt: 1n,
+  minReputationToInvoke: 0n,
   ...over,
 });
 

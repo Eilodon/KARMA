@@ -47,7 +47,8 @@ Queried by: kb-query skill
 - **action:** track; address on next contract/decode-path change.
 
 ## PD-003 — Exactly-once guard is an O(n) on-chain scan
-- **status:** OPEN
+- **status:** RESOLVED IN CODE 2026-06-17 (ADR 2026-06-17-agentskillregistry-v2) — `jobByTaskHash`
+  mapping + O(1) `findExistingJob`; pending operator redeploy to take effect on the live contract.
 - **discovered:** 2026-06-16 during P4.2b/P6.3
 - **evidence:** `findJobByTaskHash` scans `getRequesterJobs(requester)` and reads each job's taskHash
   (O(n) per create_job). Correct and fine at demo scale; degrades as a requester accumulates jobs.
@@ -71,7 +72,10 @@ Queried by: kb-query skill
 - **action:** track; address alongside PD-002's integration-test work or first multi-instance deploy.
 
 ## PD-005 — Trust Gate is app-layer advisory, not on-chain enforced (Phase 2 deferred)
-- **status:** OPEN (Phase 1 shipped 2026-06-16; plan 2026-06-16-trust-gate-min-reputation)
+- **status:** RESOLVED IN CODE 2026-06-17 (ADR 2026-06-17-agentskillregistry-v2) — on-chain
+  `agentReputation` + `Skill.minReputationToInvoke` + `createJob` require; enforcement is now
+  consensus-level (pending operator redeploy). Residual: wash-trade resistance needs stake/identity
+  (out of scope); index threshold is now display-only. Phase 1 (below) is superseded by this.
 - **discovered:** 2026-06-16 while implementing `min_reputation_to_invoke`
 - **evidence:** `create_job` enforces the per-skill reputation threshold in the tool handler
   (`karma.tool.ts`), reading both the threshold and the requester's reputation from the in-process
