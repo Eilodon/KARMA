@@ -6,7 +6,7 @@ The system has three layers:
 
 - **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
 - **Layer 1 — KARMA plugin (`karma.tool.ts`):** Ten MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process.
-- **Layer 2 — `AgentSkillRegistry` contract:** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, and withdrawals. Verified live at [`0x75ff9822…753f57`](https://atlantic.pharosscan.xyz/address/0x75ff9822f9da947881247cecba74dccdea753f57).
+- **Layer 2 — `AgentSkillRegistry` contract:** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, and withdrawals. Verified live at [`0xc6d5c146…b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae).
 
 > Package: `karma`
 > Runtime entrypoint: `dist/index.js`
@@ -87,7 +87,7 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 
 ### Layer 2 — AgentSkillRegistry contract (live on Pharos Atlantic)
 
-- Deployed: [`0x75ff9822f9da947881247cecba74dccdea753f57`](https://atlantic.pharosscan.xyz/address/0x75ff9822f9da947881247cecba74dccdea753f57)
+- Deployed: [`0xc6d5c146209e0833634bd33fafb9e65081b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae)
 - Deploy tx: [`0x8615c1ce…0cea8c`](https://atlantic.pharosscan.xyz/tx/0x8615c1ce7664913370c341af4342e4f27ffa9dbc3a02d65b8a89d044e10cea8c) (block 24283311, gas 1,462,073)
 - 5-transaction self-referential demo loop completed live — skill registered, job escrowed, result delivered, completion confirmed, payout withdrawn.
 - Reputation: BASE=50, MAX=100, STEP=5 (matches Foundry tests).

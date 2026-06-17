@@ -201,6 +201,16 @@ function isExecutionLockError(error: unknown): boolean {
 }
 
 /**
+ * PD-006: a tenant tried to drive an agent it does not own (STRIDE-S, keystore assertOwnedBy).
+ * Surfaced as a distinct telemetry signal so security monitoring can alarm on spoof attempts,
+ * instead of it hiding inside generic tool_execution_failed events.
+ */
+export function isTenantMismatchError(error: unknown): boolean {
+  const text = String(error instanceof Error ? error.message : error);
+  return text.includes("is not accessible to this tenant");
+}
+
+/**
  * Heuristic for infrastructure / network errors that are safe to retry.
  * Transient errors release the idempotency lock so callers can resubmit.
  * Permanent errors (tool logic failures) commit with a short error TTL.
@@ -659,6 +669,19 @@ export function registerTools<T = Record<string, unknown>>(
           }
         });
         } catch (error) {
+          // PD-006: distinct security signal for tenant→agent spoof attempts (STRIDE-S). telemetryBase
+          // is declared inside the try, so rebuild a minimal context here from the request store.
+          if (isTenantMismatchError(error)) {
+            const errCtx = getRequestContext();
+            await telemetry.log("tenant_agent_mismatch", {
+              tool: tool.name,
+              tenantId: errCtx.tenantId,
+              userId: errCtx.userId,
+              clientId: errCtx.clientId,
+              requestId: errCtx.requestId,
+              error: String(error),
+            });
+          }
           throw toClientError(error);
         }
       }

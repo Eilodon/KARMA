@@ -10,7 +10,7 @@ handlers → `realKarmaService` → on-chain `AgentSkillRegistry`, so it exercis
 | Item | Value |
 |---|---|
 | Network | Pharos Atlantic (chainId **688689**, EIP-1559) |
-| Contract | [`0x75ff9822f9da947881247cecba74dccdea753f57`](https://atlantic.pharosscan.xyz/address/0x75ff9822f9da947881247cecba74dccdea753f57) |
+| Contract | [`0xc6d5c146209e0833634bd33fafb9e65081b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae) |
 | Deploy tx | [`0x8615c1ce…0cea8c`](https://atlantic.pharosscan.xyz/tx/0x8615c1ce7664913370c341af4342e4f27ffa9dbc3a02d65b8a89d044e10cea8c) (block 24283311, gas 1,462,073) |
 | Agent Alpha | `0x857c2F11E9EDDdC7DDc03d035B0998De3c7677ec` (provider) |
 | Agent Beta | `0x00d5f57009279aB0195264Fa2160F43055deD938` (requester) |
