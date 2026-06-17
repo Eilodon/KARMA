@@ -21,6 +21,7 @@ const skill = (over: Partial<OnchainSkill> = {}): OnchainSkill => ({
   totalInvocations: 3n,
   active: true,
   registeredAt: 1n,
+  minReputationToInvoke: 0n,
   ...over,
 });
 
@@ -40,6 +41,10 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
     createJob: vi.fn(async () => ({ jobId: 4n, outcome: confirmed })),
     deliverResult: vi.fn(async () => confirmed),
     confirmCompletion: vi.fn(async () => confirmed),
+    disputeResult: vi.fn(async () => confirmed),
+    claimAfterReview: vi.fn(async () => confirmed),
+    setMinReputation: vi.fn(async () => confirmed),
+    getAgentReputation: vi.fn(async () => 50),
     getAgentSkills: vi.fn(async () => [7n]),
     getProviderJobs: vi.fn(async () => [4n, 9n]),
     getRequesterJobs: vi.fn(async () => [2n]),
@@ -96,6 +101,8 @@ describe("P6 KARMA tools", () => {
       "create_job",
       "deliver_result",
       "complete_job",
+      "dispute_result",
+      "claim_after_review",
       "get_agent_reputation",
       "query_social_graph",
       "get_pending_balance",
@@ -187,8 +194,8 @@ describe("P6 KARMA tools", () => {
 
   it("create_job: Trust Gate rejects a requester below the skill threshold (no escrow)", async () => {
     svc = fakeService({
-      getSkillThreshold: vi.fn(() => 70),
-      getReputation: vi.fn(() => 55),
+      readSkill: vi.fn(async () => skill({ minReputationToInvoke: 70n })),
+      getAgentReputation: vi.fn(async () => 55),
     });
     tools = createKarmaTools(svc);
     const res = await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
@@ -205,8 +212,8 @@ describe("P6 KARMA tools", () => {
 
   it("create_job: Trust Gate allows a requester at/above the threshold", async () => {
     svc = fakeService({
-      getSkillThreshold: vi.fn(() => 50),
-      getReputation: vi.fn(() => 55),
+      readSkill: vi.fn(async () => skill({ minReputationToInvoke: 50n })),
+      getAgentReputation: vi.fn(async () => 55),
     });
     tools = createKarmaTools(svc);
     const res = await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
@@ -215,14 +222,14 @@ describe("P6 KARMA tools", () => {
   });
 
   it("create_job: threshold 0 (default) skips the gate entirely", async () => {
-    // default fake: getSkillThreshold → 0; getReputation must never be consulted
+    // default fake skill: minReputationToInvoke 0n ⇒ on-chain reputation must never be consulted
     await call(tool(tools, "create_job"), { agentId: "agent-beta", skillId: "7", idempotencyNonce: 1 });
-    expect(svc.getReputation).not.toHaveBeenCalled();
+    expect(svc.getAgentReputation).not.toHaveBeenCalled();
     expect(svc.createJob).toHaveBeenCalledTimes(1);
   });
 
   it("get_agent_reputation: surfaces the aggregate agentReputation the gate checks", async () => {
-    svc = fakeService({ getReputation: vi.fn(() => 65) });
+    svc = fakeService({ getAgentReputation: vi.fn(async () => 65) });
     tools = createKarmaTools(svc);
     const res = await call(tool(tools, "get_agent_reputation"), { agentId: "agent-alpha" });
     expect((res.structuredContent as { agentReputation: number }).agentReputation).toBe(65);
@@ -238,6 +245,21 @@ describe("P6 KARMA tools", () => {
     const cj = await call(tool(tools, "complete_job"), { agentId: "agent-beta", jobId: "4" });
     expect((cj.structuredContent as { txHash: string }).txHash).toBe(TXH);
     expect(svc.confirmCompletion).toHaveBeenCalled();
+  });
+
+  it("dispute_result: requester rejects a delivered job within the review window", async () => {
+    const res = await call(tool(tools, "dispute_result"), { agentId: "agent-beta", jobId: "4" });
+    expect((res.structuredContent as { jobId: string; txHash: string }).jobId).toBe("4");
+    expect((res.structuredContent as { txHash: string }).txHash).toBe(TXH);
+    expect(svc.disputeResult).toHaveBeenCalledTimes(1);
+    expect(svc.account).toHaveBeenCalledWith("agent-beta", "tenant_local");
+  });
+
+  it("claim_after_review: provider claims after the review window", async () => {
+    const res = await call(tool(tools, "claim_after_review"), { agentId: "agent-alpha", jobId: "4" });
+    expect((res.structuredContent as { jobId: string }).jobId).toBe("4");
+    expect(svc.claimAfterReview).toHaveBeenCalledTimes(1);
+    expect(hasBigInt(res.structuredContent)).toBe(false);
   });
 
   it("get_agent_reputation: stringifies totalInvocations + skillId (D-6)", async () => {
