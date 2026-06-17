@@ -181,6 +181,50 @@ async function handleFullFormat(address: Address, svc: KarmaService): Promise<So
   };
 }
 
+/** AgentSkillRegistry.JobStatus numeric values — MUST match the Solidity enum order. */
+const JOB_STATUS = { Open: 0, Delivered: 1, Completed: 2, Refunded: 3, Disputed: 4 } as const;
+
+/**
+ * Graceful status-idempotency for lifecycle writes (R2 / ADR-2). An MCP-layer timeout whose tx
+ * actually mined leaves the job already at its target status; a blind retry would then revert on
+ * the contract's status guard (e.g. "job not open") and an autonomous agent could mis-read that as
+ * a hard failure and abandon the workflow. So before each lifecycle write we read the job once and:
+ *   - current === target      → idempotent no-op: return "already_done" (NO second tx).
+ *   - current === expectedPre  → normal path: the caller proceeds to the write.
+ *   - otherwise                → return "unexpected_state" naming the real on-chain status, instead
+ *                                of letting a doomed write revert with an opaque message.
+ * The on-chain `require` stays authoritative: a read↔write TOCTOU just falls through to the
+ * contract guard exactly as before — this only improves the off-chain message and idempotency.
+ * Time-based guards (review window) are NOT replicated here; they remain on-chain authoritative.
+ */
+async function precheckLifecycle(
+  svc: KarmaService,
+  jobId: bigint,
+  op: string,
+  expectedPre: number,
+  target: number,
+): Promise<ToolResult | null> {
+  const { status } = await svc.readJob(jobId);
+  if (status === target) {
+    return reply(`[KARMA] ${op} job #${jobId}: already ${STATUS_MAP[target]} (idempotent no-op, no tx sent)`, {
+      status: "already_done",
+      jobId,
+      jobStatus: STATUS_MAP[target] ?? String(target),
+    });
+  }
+  if (status === expectedPre) return null; // expected precondition → proceed to the write
+  return reply(
+    `[KARMA] ${op} job #${jobId}: on-chain status is ${STATUS_MAP[status] ?? `Unknown(${status})`}, ` +
+      `expected ${STATUS_MAP[expectedPre]} — no tx sent`,
+    {
+      status: "unexpected_state",
+      jobId,
+      jobStatus: STATUS_MAP[status] ?? String(status),
+      expected: STATUS_MAP[expectedPre] ?? String(expectedPre),
+    },
+  );
+}
+
 export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
   const writeAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
   const readAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -281,11 +325,15 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
 
   const createJob: ToolDefinition = {
     name: "create_job",
-    description: "Escrow a job against a skill. Idempotent per (requester, skillId, idempotencyNonce): a repeat returns the existing job instead of double-escrowing.",
+    description:
+      "Escrow a job against a skill. Exactly-once per (requester, skillId, idempotencyNonce): a repeat " +
+      "returns the existing job instead of double-escrowing. To retry safely you MUST resend the SAME " +
+      "idempotencyNonce — a status:\"pending\" result means the tx is already broadcast (NOT failed), so " +
+      "never retry it with a fresh nonce or you will escrow a second, distinct job.",
     inputSchema: {
       agentId: z.string().describe("Keystore agent id of the requester."),
       skillId: WEI.describe("Target skill id."),
-      idempotencyNonce: z.number().int().positive().describe("Caller-chosen nonce making this request replay-safe."),
+      idempotencyNonce: z.number().int().positive().describe("Caller-chosen nonce. REUSE the same value to retry the same job exactly-once; a new value creates a new job."),
       deadlineSecs: z.number().int().positive().max(2_592_000).optional().describe("Seconds until refund deadline (default 86400)."),
     },
     capabilities: ["network"],
@@ -329,6 +377,14 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
         }
       }
 
+      // Exactly-once is enforced in THREE layers, all keyed by this deterministic taskHash =
+      // keccak(requester, skillId, idempotencyNonce):
+      //   1. MCP idempotency record (tenant+tool+args incl. nonce) — dedupes in-process retries.
+      //   2. findExistingJob() pre-check below — best-effort, has a TOCTOU window while the first tx
+      //      is still in the mempool (jobByTaskHash not yet written), so it is NOT the guarantee.
+      //   3. AUTHORITATIVE: the contract's `require(jobByTaskHash[taskHash] == 0)` (Fix 5). A racing
+      //      lost-ack retry that slips past (2) reverts on-chain and refunds msg.value — no double
+      //      escrow. This holds ONLY because the nonce (hence taskHash) is stable across retries.
       const taskHash = svc.deriveTaskHash(requester, skillId, BigInt(a.idempotencyNonce));
       const existing = await svc.findExistingJob(requester, taskHash);
       if (existing != null) {
@@ -375,10 +431,11 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
       assertInProcess();
       const a = z.object({ agentId: z.string(), jobId: WEI, resultHash: RESULT_HASH }).parse(args);
       const { tenantId } = getRequestContext();
-      const outcome = await svc.deliverResult(svc.account(a.agentId, tenantId), {
-        jobId: BigInt(a.jobId),
-        resultHash: a.resultHash as Hash,
-      });
+      const account = svc.account(a.agentId, tenantId); // STRIDE-S auth gate first
+      const jobId = BigInt(a.jobId);
+      const pre = await precheckLifecycle(svc, jobId, "deliver_result", JOB_STATUS.Open, JOB_STATUS.Delivered);
+      if (pre) return pre;
+      const outcome = await svc.deliverResult(account, { jobId, resultHash: a.resultHash as Hash });
       return reply(`[KARMA] deliver_result job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
         status: outcome.status,
         jobId: a.jobId,
@@ -399,7 +456,11 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
       assertInProcess();
       const a = z.object({ agentId: z.string(), jobId: WEI }).parse(args);
       const { tenantId } = getRequestContext();
-      const outcome = await svc.confirmCompletion(svc.account(a.agentId, tenantId), { jobId: BigInt(a.jobId) });
+      const account = svc.account(a.agentId, tenantId); // STRIDE-S auth gate first
+      const jobId = BigInt(a.jobId);
+      const pre = await precheckLifecycle(svc, jobId, "complete_job", JOB_STATUS.Delivered, JOB_STATUS.Completed);
+      if (pre) return pre;
+      const outcome = await svc.confirmCompletion(account, { jobId });
       return reply(`[KARMA] complete_job job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
         status: outcome.status,
         jobId: a.jobId,
@@ -422,7 +483,13 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
       assertInProcess();
       const a = z.object({ agentId: z.string(), jobId: WEI }).parse(args);
       const { tenantId } = getRequestContext();
-      const outcome = await svc.disputeResult(svc.account(a.agentId, tenantId), { jobId: BigInt(a.jobId) });
+      const account = svc.account(a.agentId, tenantId); // STRIDE-S auth gate first
+      const jobId = BigInt(a.jobId);
+      // Status precheck only — the review-window timing stays on-chain authoritative (may still
+      // revert "review window closed", which is the intended boundary, not an idempotency failure).
+      const pre = await precheckLifecycle(svc, jobId, "dispute_result", JOB_STATUS.Delivered, JOB_STATUS.Disputed);
+      if (pre) return pre;
+      const outcome = await svc.disputeResult(account, { jobId });
       return reply(`[KARMA] dispute_result job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
         status: outcome.status,
         jobId: a.jobId,
@@ -445,7 +512,13 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
       assertInProcess();
       const a = z.object({ agentId: z.string(), jobId: WEI }).parse(args);
       const { tenantId } = getRequestContext();
-      const outcome = await svc.claimAfterReview(svc.account(a.agentId, tenantId), { jobId: BigInt(a.jobId) });
+      const account = svc.account(a.agentId, tenantId); // STRIDE-S auth gate first
+      const jobId = BigInt(a.jobId);
+      // Status precheck only — the "window closed" timing stays on-chain authoritative. Target is
+      // Completed: a job the requester already confirmed reads as Completed → idempotent no-op.
+      const pre = await precheckLifecycle(svc, jobId, "claim_after_review", JOB_STATUS.Delivered, JOB_STATUS.Completed);
+      if (pre) return pre;
+      const outcome = await svc.claimAfterReview(account, { jobId });
       return reply(`[KARMA] claim_after_review job #${a.jobId} ${outcome.status} tx=${outcome.hash}`, {
         status: outcome.status,
         jobId: a.jobId,
@@ -592,6 +665,40 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     },
   };
 
+  const readJob: ToolDefinition = {
+    name: "read_job",
+    description:
+      "Read a single job's on-chain state by jobId: parties, skill, escrow, deadline, lifecycle status, " +
+      'and result hash. Read-only — use it to reconcile after a write returns status:"pending", or to ' +
+      "check whether a lifecycle transition (deliver/complete/dispute/claim) already happened on-chain.",
+    inputSchema: { jobId: WEI.describe("Job id to read.") },
+    capabilities: ["network"],
+    allowedPhases: [...PHASES],
+    annotations: readAnnotations,
+    execution: { taskSupport: "forbidden" },
+    handler: async (args) => {
+      assertInProcess();
+      const a = z.object({ jobId: WEI }).parse(args);
+      const jobId = BigInt(a.jobId);
+      const j = await svc.readJob(jobId);
+      const statusLabel = STATUS_MAP[j.status] ?? `Unknown(${j.status})`;
+      return reply(`[KARMA] job #${jobId}: ${statusLabel} escrow=${weiToPhrs6(j.escrowAmount)} PHRS`, {
+        jobId,
+        requester: j.requester,
+        provider: j.provider,
+        skillId: j.skillId,
+        taskHash: j.taskHash,
+        escrowWei: j.escrowAmount,
+        escrowPHRS: weiToPhrs6(j.escrowAmount),
+        deadline: Number(j.deadline),
+        status: statusLabel,
+        resultHash: j.resultHash.toLowerCase() === ZERO_HASH ? null : j.resultHash,
+        createdAt: Number(j.createdAt),
+        completedAt: Number(j.completedAt),
+      });
+    },
+  };
+
   return [
     registerSkill,
     discoverSkills,
@@ -600,6 +707,7 @@ export function createKarmaTools(svc: KarmaService): ToolDefinition[] {
     completeJob,
     disputeResult,
     claimAfterReview,
+    readJob,
     getAgentReputation,
     querySocialGraph,
     getPendingBalance,

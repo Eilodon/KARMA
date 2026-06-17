@@ -5,7 +5,7 @@
 The system has three layers:
 
 - **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
-- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Eleven MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm, plus dispute / claim-after-review), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process and every tool is bound to the caller's tenant (STRIDE-S).
+- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Thirteen MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm, plus dispute / claim-after-review and single-job reads for reconciliation), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process and every tool is bound to the caller's tenant (STRIDE-S).
 - **Layer 2 — `AgentSkillRegistry` contract (v2):** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, on-chain Trust Gate, and withdrawals. Verified live at [`0xc6d5c146…b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae).
 
 > Package: `karma`
@@ -77,7 +77,7 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 
 ### Layer 1 — KARMA plugin (fully shipped, 2026-06-16)
 
-- Eleven in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `dispute_result`, `claim_after_review`, `get_agent_reputation`, `query_social_graph`, `get_pending_balance`, `withdraw_balance`. Every tool that resolves a signing account threads the caller's `tenantId` (`getRequestContext()`) into `KarmaService.account/addressOf`, which fails closed via `KeystoreManager.assertOwnedBy` (STRIDE-S tenant→agent isolation).
+- Thirteen in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `dispute_result`, `claim_after_review`, `read_job`, `get_agent_reputation`, `query_social_graph`, `get_pending_balance`, `withdraw_balance`. Lifecycle writes (`deliver_result`/`complete_job`/`dispute_result`/`claim_after_review`) read the job first and return a graceful `already_done` / `unexpected_state` instead of an opaque revert when a timed-out tx actually mined (R2/ADR-2 idempotency); `read_job` lets an agent reconcile a job by id. Every tool that resolves a signing account threads the caller's `tenantId` (`getRequestContext()`) into `KarmaService.account/addressOf`, which fails closed via `KeystoreManager.assertOwnedBy` (STRIDE-S tenant→agent isolation).
 - Web3 Secret Storage v3 keystore (`KeystoreManager`): scrypt + aes-128-ctr in-process decrypt. Private keys never exposed — only viem `Account` objects.
 - In-process BM25 skill index (`BM25SkillIndex` via MiniSearch): reputation-boosted ranking, BigInt-safe price/reputation filters, prompt-injection-resistant text sanitization.
 - `SkillEventIndexer`: backfill + live-watch + reconnect on error. Started at server boot by `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`), which reconciles chain events into the BM25 index (SkillRegistered → hydrate+upsert, SkillDeactivated → discard, JobCompleted → refresh that skill's reputation). Health state (`lastIndexedBlock`, `lastEventAt`, `watching`) is surfaced through `karma_health` (`indexer` field).
@@ -250,7 +250,7 @@ Storage / telemetry
 │   │   ├── rate_limit.ts
 │   │   └── vault.ts
 │   ├── plugins/
-│   │   ├── karma.tool.ts            ← KARMA skill economy (11 tools, trusted built-in)
+│   │   ├── karma.tool.ts            ← KARMA skill economy (13 tools, trusted built-in)
 │   │   └── system.tool.ts           ← ping + pattern_debt + test_long_task
 │   ├── scripts/
 │   │   ├── _demo_format.ts          ← zero-dep ANSI presentation helpers for the demos

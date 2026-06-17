@@ -10,9 +10,13 @@ import {AgentSkillRegistry} from "../contracts/AgentSkillRegistry.sol";
 contract Deploy is Script {
     function run() external returns (AgentSkillRegistry reg) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
+        // Review window is deploy-time config (immutable afterwards). Override with
+        // KARMA_REVIEW_WINDOW_SECS; defaults to 3 days. Bounded on-chain to [1h, 30d].
+        uint256 reviewWindowSecs = vm.envOr("KARMA_REVIEW_WINDOW_SECS", uint256(3 days));
         vm.startBroadcast(pk);
-        reg = new AgentSkillRegistry();
+        reg = new AgentSkillRegistry(reviewWindowSecs);
         vm.stopBroadcast();
         console.log("AgentSkillRegistry deployed at:", address(reg));
+        console.log("REVIEW_WINDOW (secs):", reviewWindowSecs);
     }
 }

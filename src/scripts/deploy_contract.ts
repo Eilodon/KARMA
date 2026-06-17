@@ -15,6 +15,8 @@ const PASSWORD = process.env.KEYSTORE_PASSWORD;
 const KEYSTORE_PATH = process.env.KEYSTORE_PATH ?? "./keystore.json";
 const DEPLOYER_AGENT = process.env.DEPLOYER_AGENT ?? "agent-alpha";
 const ARTIFACT_PATH = "./out/AgentSkillRegistry.sol/AgentSkillRegistry.json";
+// Review window is deploy-time config (immutable afterwards); default 3 days, bounded on-chain to [1h,30d].
+const REVIEW_WINDOW_SECS = BigInt(process.env.KARMA_REVIEW_WINDOW_SECS ?? 3 * 24 * 60 * 60);
 
 async function main(): Promise<void> {
   if (!PASSWORD) throw new Error("Set KEYSTORE_PASSWORD to unlock the keystore.");
@@ -31,10 +33,11 @@ async function main(): Promise<void> {
   console.log(`Deployer ${DEPLOYER_AGENT} ${account.address} balance=${bal} wei`);
   if (bal === 0n) throw new Error("Deployer has 0 balance — fund it from a faucet first.");
 
-  console.log("Deploying AgentSkillRegistry...");
+  console.log(`Deploying AgentSkillRegistry (REVIEW_WINDOW=${REVIEW_WINDOW_SECS}s)...`);
   const hash = await walletClient.deployContract({
     abi: agentSkillRegistryAbi,
     bytecode,
+    args: [REVIEW_WINDOW_SECS],
     account,
     chain: pharosAtlantic,
   });

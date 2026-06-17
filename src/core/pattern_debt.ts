@@ -5,6 +5,7 @@ export const PATTERN_DEBT_IDS = [
   "DEBT-004",
   "DEBT-005",
   "DEBT-006",
+  "DEBT-007",
 ] as const;
 
 export type PatternDebtId = typeof PATTERN_DEBT_IDS[number];
@@ -143,6 +144,25 @@ const ITEMS: readonly PatternDebtItem[] = [
       "Exponential backoff is derived from violation_count and severity_ema.",
     ],
     nextAction: "Revisit after production traffic provides enough incident data for calibration.",
+  },
+  {
+    id: "DEBT-007",
+    key: "agent-key-erasure-boundary",
+    title: "KARMA agent signing keys outside the KMS crypto-erasure boundary",
+    status: "monitoring",
+    urgency: "documented",
+    currentControl: "KARMA agent signing keys are operator-provisioned Web3 Secret Storage v3 (scrypt+aes-128-ctr) entries in a keystore file, decrypted in-process by KeystoreManager (D-1, trusted built-in plugin). They are deliberately NOT sealed by EncryptionService / smcp:v4:kms (DEBT-002): those keys are infrastructure credentials shared by a tenant's agents, not per-tenant user state, and the `tenant` field on an entry is an authz binding (assertOwnedBy) — not a data-lifecycle owner. KeystoreManager.unload(agentId)/clear() drop decrypted viem accounts so GC can reclaim them, and graceful shutdown clears the in-memory map.",
+    limitation: "The smcp:v4:kms crypto-erasure guarantee (delete a tenant ⇒ its sealed state becomes unrecoverable) does NOT extend to agent private keys: there is no tenant self-deletion flow in KARMA, and the keystore file is on disk outside KMS. viem's privateKeyToAccount also retains the key inside a closure that V8 cannot force-zero, so unload()/clear() shrink but do not provably erase the heap copy.",
+    resolutionTrigger: "A deployment promises tenant-deletion crypto-erasure that must cover agent signing keys, OR adds tenant self-service agent provisioning/offboarding, OR requires guaranteed key zeroization (heap-dump / cold-boot threat in scope).",
+    implementationGate: "Do not re-route agent keys through EncryptionService (wrong layer — that seals state blobs, not signing keys). True coverage needs an out-of-process signer / HSM / remote-signing KMS so the private key never enters this process, plus an offboarding runbook (remove keystore entry + unload() + rotate/abandon the on-chain key) wired to tenant lifecycle.",
+    ownerHint: "key-management",
+    runtimeGuards: [
+      "Agent keys never leave KeystoreManager — only viem Account objects (which sign internally) are exposed.",
+      "KeystoreManager runs in-process only (D-1); the canary assertInProcess blocks out-of-process execution.",
+      "unload(agentId)/clear() drop decrypted accounts for offboarding and graceful shutdown.",
+      "assertOwnedBy enforces tenant→agent authz before any signing account is handed out (STRIDE-S).",
+    ],
+    nextAction: "Keep documented until a deployment needs tenant-lifecycle key erasure or an out-of-process/HSM signer; pair any keystore-entry removal with unload() + on-chain key rotation.",
   },
 ] as const;
 

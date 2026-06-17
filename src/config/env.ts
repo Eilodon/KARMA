@@ -48,6 +48,10 @@ const EnvSchema = z.object({
   KARMA_DEFAULT_AGENT_TENANT: z.string().optional(),
   // KARMA DoS hardening (A3): max distinct job edges query_social_graph format:"full" hydrates.
   KARMA_SOCIAL_GRAPH_MAX_JOBS: z.number().int().min(1).max(100000).default(500),
+  // KARMA DoS hardening (KARMA-PH1-001): max blocks per indexer getLogs() call. A long catch-up —
+  // or the genesis backfill (fromBlock=0) — is chunked into windows this size so eth_getLogs never
+  // exceeds the RPC provider's range limit (which would otherwise reject and, unhandled, crash the host).
+  KARMA_INDEXER_BLOCK_RANGE: z.number().int().min(1).max(100000).default(2000),
 
   MCP_PLUGIN_ALLOWLIST: z.string().default("system.tool.js,system.tool.ts"),
   MCP_PLUGIN_AUTO_DISCOVERY: z.boolean().default(false),

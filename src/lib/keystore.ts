@@ -128,6 +128,26 @@ export class KeystoreManager {
       throw new Error(`[KARMA] agent '${agentId}' is not accessible to this tenant`);
     }
   }
+
+  /**
+   * Drop one agent's in-memory signing key so GC can reclaim it. Used for operator offboarding
+   * (DEBT-007): agent keys live OUTSIDE the smcp:v4:kms crypto-erasure boundary, so removing an
+   * agent's entry from the keystore file must be paired with an unload() here + an on-chain key
+   * rotation. Returns true if an identity was present.
+   *
+   * Honesty caveat: viem's `privateKeyToAccount` retains the key as a string inside a closure and
+   * V8 cannot be forced to zero that memory, so this SHRINKS the exposure window (reference dropped,
+   * eligible for GC) but is not a guaranteed secure-erase. True zeroization needs an out-of-process
+   * signer / HSM (tracked in DEBT-007).
+   */
+  unload(agentId: string): boolean {
+    return this.identities.delete(agentId);
+  }
+
+  /** Drop every in-memory signing key (graceful shutdown / test reset). Same GC caveat as unload(). */
+  clear(): void {
+    this.identities.clear();
+  }
 }
 
 const SCRYPT_MAXMEM = 512 * 1024 * 1024;
