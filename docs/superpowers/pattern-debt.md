@@ -27,7 +27,10 @@ Queried by: kb-query skill
 - **action:** DONE — 8 stale tests aligned to the intended hardened code, env-locked test skip-guarded (commit db7ea72). Code behavior unchanged; only tests touched.
 
 ## PD-002 — KARMA network glue has live-only coverage
-- **status:** OPEN (reduced 2026-06-16, ADR 2026-06-16-karma-graph-withdraw-indexer)
+- **status:** RESOLVED 2026-06-17 — `karma_service_integration.test.ts` spins anvil, deploys v2, and
+  exercises realKarmaService register→read→create→(O(1) dedup)→deliver→confirm→withdraw + dispute
+  end-to-end, covering the readContract/writeContractBounded DECODE paths (incl. the v2 skills tuple).
+  Skips cleanly without anvil/artifact. (was OPEN/reduced 2026-06-16)
 - **discovered:** 2026-06-16 during P4–P6 (ADR 2026-06-16-karma-app-layer)
 - **evidence:** `writeContractBounded` and `realKarmaService` reads still have no automated test
   (verified only by the live P7 demo); the ABI drift-guard catches `.sol`↔`abi.ts` shape drift but
@@ -101,7 +104,10 @@ Queried by: kb-query skill
   escrow resolution into Workstream B (`specs/2026-06-17-agentskillregistry-v2-design.md`).
 
 ## PD-006 — Tenant-mismatch has no dedicated telemetry / alarm signal
-- **status:** OPEN (new 2026-06-17, ADR 2026-06-17-app-layer-stride-hardening)
+- **status:** RESOLVED 2026-06-17 — the execution pipeline's chokepoint catch now classifies
+  `isTenantMismatchError` and emits a distinct `tenant_agent_mismatch` telemetry event (tool, tenantId,
+  userId, clientId, requestId) before re-throwing, so security monitoring can alarm on spoof attempts.
+  (was OPEN/new 2026-06-17)
 - **discovered:** 2026-06-17 during A1 (tenant→agent isolation), flagged by audit-design L6
 - **evidence:** `KeystoreManager.assertOwnedBy` throws on a tenant/agent mismatch; the execution
   pipeline catches it as a generic `tool_execution_failed` telemetry event (with the tool name but

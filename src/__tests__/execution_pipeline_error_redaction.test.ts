@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { toClientError } from "../mcp/adapter/execution_pipeline.js";
+import { toClientError, isTenantMismatchError } from "../mcp/adapter/execution_pipeline.js";
+
+describe("isTenantMismatchError (PD-006 security signal)", () => {
+  it("matches the keystore assertOwnedBy rejection message", () => {
+    expect(isTenantMismatchError(new Error("[KARMA] agent 'agent-alpha' is not accessible to this tenant"))).toBe(true);
+  });
+  it("does not match unrelated errors", () => {
+    expect(isTenantMismatchError(new Error("[KARMA] skill #7 is inactive"))).toBe(false);
+    expect(isTenantMismatchError("nothing")).toBe(false);
+  });
+});
 
 describe("toClientError (A2 error chokepoint)", () => {
   it("redacts secrets in the message but preserves name + numeric code", () => {
