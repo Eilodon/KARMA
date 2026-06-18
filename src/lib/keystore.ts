@@ -102,6 +102,10 @@ export class KeystoreManager {
     return this.requireIdentity(agentId).address;
   }
 
+  getTenant(agentId: string): string {
+    return this.requireIdentity(agentId).tenant;
+  }
+
   has(agentId: string): boolean {
     return this.identities.has(agentId);
   }

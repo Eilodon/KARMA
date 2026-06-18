@@ -4,6 +4,7 @@ import { getPublicClient } from "../lib/contract.js";
 import karmaTools from "../plugins/karma.tool.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
 import { markTrustedRuntime } from "../core/runtime_identity.js";
+import { withRequestContext, defaultRequestContext } from "../security/context.js";
 import { C, banner, step, kv, ok, short } from "./_demo_format.js";
 
 /**
@@ -33,7 +34,12 @@ const tool = (name: string): ToolDefinition => {
 const txs: Array<{ label: string; hash: string }> = [];
 
 async function call(name: string, args: unknown): Promise<Record<string, unknown>> {
-  const res = await tool(name).handler(args, {} as never);
+  const agentId = (args as { agentId?: string }).agentId;
+  const tenantId = agentId ? keystoreManager.getTenant(agentId) : defaultRequestContext().tenantId;
+  const res = await withRequestContext(
+    { ...defaultRequestContext(), tenantId },
+    () => tool(name).handler(args, {} as never),
+  );
   console.log(`  ${C.green("→")} ${res.content[0]?.text}`);
   return (res.structuredContent ?? {}) as Record<string, unknown>;
 }

@@ -10,8 +10,8 @@ handlers → `realKarmaService` → on-chain `AgentSkillRegistry`, so it exercis
 | Item | Value |
 |---|---|
 | Network | Pharos Atlantic (chainId **688689**, EIP-1559) |
-| Contract | [`0xc6d5c146209e0833634bd33fafb9e65081b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae) |
-| Deploy tx | [`0x8615c1ce…0cea8c`](https://atlantic.pharosscan.xyz/tx/0x8615c1ce7664913370c341af4342e4f27ffa9dbc3a02d65b8a89d044e10cea8c) (block 24283311, gas 1,462,073) |
+| Contract (v3) | [`0x068091d8b982379373a4db377872ffb608a979b4`](https://atlantic.pharosscan.xyz/address/0x068091d8b982379373a4db377872ffb608a979b4) |
+| Deploy block | 24406554 (2026-06-18) |
 | Agent Alpha | `0x857c2F11E9EDDdC7DDc03d035B0998De3c7677ec` (provider) |
 | Agent Beta | `0x00d5f57009279aB0195264Fa2160F43055deD938` (requester) |
 
@@ -19,18 +19,20 @@ handlers → `realKarmaService` → on-chain `AgentSkillRegistry`, so it exercis
 
 | Step | Tool | Tx |
 |---|---|---|
-| 1. Register skill #1 | `register_skill` | [`0xeac061de…6c8d03`](https://atlantic.pharosscan.xyz/tx/0xeac061de15466218c6694bf778aaaee1088736110a1bdd11da978238166c8d03) |
-| 2. Escrow job #1 (0.0001 PHRS) | `create_job` | [`0xc7707743…2ccb321`](https://atlantic.pharosscan.xyz/tx/0xc770774305492d06bacd8a8a2ec82ccbab7ee14ac37dd76c73621328b2ccb321) |
-| 3. Deliver result | `deliver_result` | [`0xf6f04c93…0fc43d4`](https://atlantic.pharosscan.xyz/tx/0xf6f04c93001bd8570f4018b70d6c1264338e2461f8fcdb68b17f5db110fc43d4) |
-| 4. Confirm completion | `complete_job` | [`0xb074f5fe…fc134b8`](https://atlantic.pharosscan.xyz/tx/0xb074f5fe5f52c55154a5516bc4a2f06df20df2d08606df71a849ef7a8fc134b8) |
-| 5. Withdraw payout | `withdraw` | [`0x424aaa72…e24237`](https://atlantic.pharosscan.xyz/tx/0x424aaa722eb505d31cab47b394cda29f767fd4faf98597fab985b443b7e24237) |
+| 1. Register skill #2 | `register_skill` | [`0xc2f1cbd0…747921`](https://atlantic.pharosscan.xyz/tx/0xc2f1cbd0488cd3c501db0e6f6c8c11448740a95a8d4e29822d2b7636a8747921) |
+| 2. Escrow job #1 (0.0001 PHRS) | `create_job` | [`0x3fd1d1ce…658685`](https://atlantic.pharosscan.xyz/tx/0x3fd1d1cea4690c11711f55fb7c74daa9b6bbf69f5319ab6a1ee27b9354658685) |
+| 3. Deliver result | `deliver_result` | [`0x16651d34…868a43`](https://atlantic.pharosscan.xyz/tx/0x16651d34260a64c69e2647314cfa732a8f6f973c6e48498e1380ae7185868a43) |
+| 4. Confirm completion | `complete_job` | [`0x97e9d08d…328c1`](https://atlantic.pharosscan.xyz/tx/0x97e9d08daf711599f33a513a84227c3068e0b8e401b6d73c42799bace1d328c1) |
+| 5. Withdraw payout | `withdraw` | [`0xc1130d27…155dac`](https://atlantic.pharosscan.xyz/tx/0xc1130d271f87ee4c31684d925ed26ac3816cf0577592d102aad81d8036155dac) |
 
 ## On-chain state after the loop (verified, read-only)
 
 ```
-ALPHA reputation: skill #1 "discover_skills" reputation=55 totalInvocations=1 active=true
-BETA social graph: asRequester=[1] asProvider=[]
-ALPHA social graph: asProvider=[1] asRequester=[]
+ALPHA reputation: agentReputation=55
+  skill #1 "discover_skills"  reputation=50  totalInvocations=0  active=true
+  skill #2 "discover_skills"  reputation=55  totalInvocations=1  active=true
+BETA social graph:  asRequester=[1]  asProvider=[]
+ALPHA social graph: asProvider=[1]   asRequester=[]
 ```
 
 Reputation rose 50 → 55 (BASE_REPUTATION + REPUTATION_STEP) on the single completion, matching the
@@ -47,8 +49,8 @@ on-chain `taskHash` dedup). The run ends with a Layer-0 hardening summary.
 # 2. Deploy:
 KEYSTORE_PASSWORD=... pnpm exec tsx src/scripts/deploy_contract.ts
 # 3. Set PHAROS_CONTRACT_ADDRESS in .env to the printed address, then:
-PHAROS_CONTRACT_ADDRESS=0x... KEYSTORE_PASSWORD=... pnpm demo
-PHAROS_CONTRACT_ADDRESS=0x... KEYSTORE_PASSWORD=... pnpm demo:verify
+KEYSTORE_PASSWORD=... pnpm demo
+KEYSTORE_PASSWORD=... pnpm demo:verify
 ```
 
 Demo knobs: `PHAROS_POLL_INTERVAL_MS=300` tightens receipt polling (viem defaults to 4000ms,
@@ -73,7 +75,7 @@ calls the real `discover_skills` tool to show:
 
 ## Layer-0 hardening (production-grade, all tested)
 
-The economic loop runs on a hardened MCP server. Exercised/asserted by the 323-test suite:
+The economic loop runs on a hardened MCP server. Exercised/asserted by the 433-test suite:
 
 - **Exactly-once** `create_job` (on-chain `taskHash` dedup; proven live in the demo).
 - **Bounded writes** — single broadcast + pending-safe receipt wait that never double-spends.
