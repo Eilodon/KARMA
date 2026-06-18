@@ -10,6 +10,7 @@ import {
   http,
   keccak256,
   encodePacked,
+  parseEventLogs,
   type Address,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -165,5 +166,39 @@ async function waitForRpc(timeoutMs = 10_000): Promise<void> {
 
     expect((await svc.readJob(jobId)).status).toBe(4); // Disputed
     expect(await svc.getPendingWithdrawal(beta)).toBe(1000n); // requester refunded
+  });
+
+  // Tier-2 activation rehearsal on a real EVM: the bond + the BondUpdated → seed bridge end-to-end.
+  it("bond on a real EVM: deposit seeds, BondUpdated decodes via abi.ts + mapLog, unlock zeroes the seed", async () => {
+    const { mapLog } = await import("../lib/contract.js");
+    const address = process.env.PHAROS_CONTRACT_ADDRESS as Address;
+    const acct = privateKeyToAccount(PK0); // alpha = anvil #0
+    const wallet = createWalletClient({ account: acct, chain: anvilChain, transport: http(RPC) });
+    const pub = createPublicClient({ chain: anvilChain, transport: http(RPC) });
+
+    // deposit a bond
+    const depHash = await wallet.writeContract({
+      address, abi: agentSkillRegistryAbi, functionName: "depositBond", value: 2000n, account: acct, chain: anvilChain,
+    });
+    const depReceipt = await pub.waitForTransactionReceipt({ hash: depHash });
+
+    // on-chain seed-eligible bond reflects the deposit (real decode of the new view)
+    expect(await pub.readContract({ address, abi: agentSkillRegistryAbi, functionName: "seedEligibleBond", args: [alpha] })).toBe(2000n);
+
+    // the REAL BondUpdated event decodes through abi.ts and maps to the indexer's IndexedEvent —
+    // proving the on-chain → off-chain seed bridge end-to-end (what the unit tests mock).
+    const parsed = parseEventLogs({ abi: agentSkillRegistryAbi, eventName: "BondUpdated", logs: depReceipt.logs });
+    expect(parsed.length).toBe(1);
+    const ev = mapLog(parsed[0]) as { type: string; agent: string; bondedAmount: bigint; seedEligible: bigint };
+    expect(ev).toMatchObject({ type: "BondUpdated", bondedAmount: 2000n, seedEligible: 2000n });
+    expect(ev.agent.toLowerCase()).toBe(alpha.toLowerCase());
+
+    // request unlock → seed drops to 0 (cooling), capital stays locked (flash-seed defense)
+    const unlockHash = await wallet.writeContract({
+      address, abi: agentSkillRegistryAbi, functionName: "requestBondUnlock", account: acct, chain: anvilChain,
+    });
+    await pub.waitForTransactionReceipt({ hash: unlockHash });
+    expect(await pub.readContract({ address, abi: agentSkillRegistryAbi, functionName: "seedEligibleBond", args: [alpha] })).toBe(0n);
+    expect(await pub.readContract({ address, abi: agentSkillRegistryAbi, functionName: "bondedAmount", args: [alpha] })).toBe(2000n);
   });
 });

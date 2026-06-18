@@ -122,3 +122,58 @@ Queried by: kb-query skill
   `tenant_agent_mismatch` telemetry event + alarm.
 - **action:** track; defense is fail-closed already (access denied), this is observability only.
 
+## PD-007 — Reputation is Sybil/wash-trade farmable by a wallet ring (1-wallet sub-case fixed)
+- **status:** OPEN (Tier-0 sub-case RESOLVED 2026-06-17, ADR 2026-06-17-karma-sybil-resistant-reputation)
+- **discovered:** 2026-06-17 during research into PD-005's disclosed "wash-trade resistance needs
+  stake/identity" residual.
+- **evidence:** `_settleCompletion` bumped the per-skill `reputationScore` (→ off-chain BM25 boost
+  `1 + rep/100`, 1.0..2.0×, [bm25_index.ts:163-165](../../src/lib/bm25_index.ts#L163-L165)) and
+  `totalInvocations` **unconditionally**, while only `agentReputation` was behind the Abductive-2
+  self-deal guard. `createJob` has no `msg.sender != owner` check and accepts `pricePerCall == 0`, so
+  a **single wallet** could self-deal price-0 jobs on its own skill (create→deliver→confirm,
+  `requester == provider`) to drive its skill rank to the 2.0× ceiling at **gas-only, zero capital** —
+  cheaper than the 2-wallet Trust-Gate farm. The pre-existing `test_SelfDeal_NoRepFarm` ran this pump
+  twice while asserting only agent rep, so it certified the gap.
+- **root cause:** a guard wrapping only one of two twinned trust-signal writes; ranking trusts an
+  on-chain counter that is mintable inside a closed set (no non-bootstrappability / seed anchor).
+- **Tier-0 fix (SHIPPED, source-only — next redeploy carries it on-chain):** moved
+  `reputationScore` + `totalInvocations` inside the `requester != provider` guard in
+  `_settleCompletion`; self-deal now earns ZERO signal. RED→GREEN verified (pre-fix 75/60 != 50);
+  `forge test` 25/25. Closes the **1-wallet** sub-case only.
+- **Tier-1 flow reputation (SHIPPED, off-chain, flag-gated `KARMA_DISCOVERY_RANK=flow`, default OFF):**
+  `src/lib/flow_reputation.ts` (EigenTrust-lite: value×decay×pair-saturation, seed-pluggable,
+  per-owner boost, DoS-capped, deterministic) + `bm25_index.ts` `setBoost` seam + indexer edge capture.
+  Value-weighting alone zeroes price-0 pumps; SEEDED mode is non-bootstrappable (ring scores ~0).
+  flow-rep tests + seam/edge tests. **Dormant** until flipped on with a real seed set.
+- **Tier-2 bond (SHIPPED in source, NOT live-deployed):** optional per-agent native-currency bond as
+  the flow-rep SEED — `depositBond`/`requestBondUnlock`(7-day cooldown, seed→0)/`cancelBondUnlock`/
+  `withdrawBond`(→pull-payment)/`seedEligibleBond` + `BondUpdated` event in
+  `contracts/AgentSkillRegistry.sol`; `abi.ts` synced (drift-guard green); `BondUpdated`→
+  `FlowBoostSource.setBondSeed`→`seedWeightFromBond` (log-capped) bridge in the indexer. Bond never
+  recycles (unlike escrow) → N identities cost N locked bonds; cooldown defeats flash-seed; non-paywall
+  (zero-bond agents still rank). **No slashing** (see PD-008). 9 forge + 3 engine + 2 indexer tests.
+  Rides the SAME un-redeployed contract version as the Tier-0 fix → one future migration carries both.
+- **residual (the still-open debt):** the bond is **not live** and Tier-1 is default-off; until the
+  redeploy + flag-flip, discovery uses the legacy boost and a **≥2-wallet ring** still farms agent rep
+  (Trust Gate) at gas-only cost. Seedless Tier-1 only *raises the bar* (a test asserts this).
+- **resolution_trigger:** **Deploy + activate** when discovery is shown gamed OR before any
+  value-bearing deploy OR the next redeploy fires (PD-003) — redeploy the bonded version (Tier-0 + bond,
+  bundle PD-003's `jobByTaskHash`), migrate skill state, set `KARMA_DISCOVERY_RANK=flow` with bond as
+  seed, validate on the PD-002 anvil harness. Code is built+tested; this is a deploy + config step.
+- **action:** track; Tier-0 + Tier-1 + Tier-2 shipped in source (ADR 2026-06-17-karma-sybil-resistant-
+  reputation); live deploy + flag-flip + slashing (PD-008) deferred. whole repo green:
+  `npm test` 421 pass | 1 skip, `forge test` 34, typecheck/lint/drift-guard clean.
+
+## PD-008 — No quality-slashing of Sybil bonds (Tier-2b deferred)
+- **status:** OPEN (deferred by design, ADR 2026-06-17-karma-sybil-resistant-reputation)
+- **discovered:** 2026-06-18 while shipping the Tier-2 bond.
+- **evidence:** the bond (PD-007) makes Sybil *origination* of trust cost locked capital, but a bonded
+  agent that delivers junk is not punished — `withdrawBond` returns the full bond after cooldown
+  regardless of delivery quality. Bond = Sybil-cost lever, NOT a quality bond.
+- **root cause:** slashing needs an OBJECTIVE trigger or trusted arbitration (Kleros-style). The only
+  on-chain signal is `disputeResult`, but a requester can be Sybil too, so dispute-driven slashing is
+  itself a griefing vector. Designing it safely is its own audit-design cycle.
+- **resolution_trigger:** only if junk-delivery-despite-bond is observed in practice AND an objective
+  slash trigger / arbitration design lands — then add slashing in a dedicated audit-design + ADR cycle.
+- **action:** track; intentionally out of scope — Sybil resistance does not require slashing.
+

@@ -56,6 +56,10 @@ contract AgentSkillRegistry is ReentrancyGuard {
     uint256 public constant MAX_REVIEW_WINDOW = 30 days;
     /// @notice Recommended default review window when a deployer does not override it.
     uint256 public constant DEFAULT_REVIEW_WINDOW = 3 days;
+    /// @notice Cooldown between requesting a bond unlock and being able to withdraw it (Tier-2,
+    ///         PD-007). Capital must stay locked across the cooldown, so a Sybil cannot lock-seed-
+    ///         unlock in a flash — bonded capital is committed, not flash-rentable.
+    uint256 public constant BOND_UNLOCK_COOLDOWN = 7 days;
 
     // ── State ──────────────────────────────────────────────────
     uint256 private _skillIdCounter;
@@ -69,6 +73,12 @@ contract AgentSkillRegistry is ReentrancyGuard {
     mapping(address => uint256) public pendingWithdrawals; // pull-payment ledger
     mapping(bytes32 => uint256) public jobByTaskHash; // PD-003: O(1) dedup (taskHash binds requester)
     mapping(address => uint256) private _agentRep; // PD-005: 0 = unset ⇒ BASE_REPUTATION (rep only rises)
+    // Tier-2 Sybil-resistance bond (PD-007): optional, per-agent, capital-at-risk SEED for off-chain
+    // flow reputation. Locked while active; withdrawable only by the same agent after a cooldown, so
+    // running N Sybil identities costs N bonds locked at once. NOT a paywall (zero-bond agents still
+    // register/rank) and NOT slashed here — Sybil cost is the lockup, not punishment.
+    mapping(address => uint256) public bondedAmount; // total locked bond per agent
+    mapping(address => uint256) public bondUnlockAt; // 0 = active (seeds); >0 = cooling down (no seed)
 
     // ── Events ─────────────────────────────────────────────────
     event SkillRegistered(uint256 indexed skillId, address indexed owner, string name, uint256 pricePerCall);
@@ -82,6 +92,9 @@ contract AgentSkillRegistry is ReentrancyGuard {
     event ResultDisputed(uint256 indexed jobId, address indexed requester, uint256 amount);
     event MinReputationSet(uint256 indexed skillId, uint256 minReputation);
     event Withdrawn(address indexed who, uint256 amount);
+    /// @param seedEligible bonded amount that currently counts as a flow-reputation seed (0 while
+    ///        cooling down). The off-chain indexer mirrors this into FlowReputationParams.seeds.
+    event BondUpdated(address indexed agent, uint256 bondedAmount, uint256 seedEligible);
 
     // ── Constructor ────────────────────────────────────────────
     /// @param reviewWindowSecs post-delivery review window (seconds). Deploy-time config, then
@@ -234,18 +247,25 @@ contract AgentSkillRegistry is ReentrancyGuard {
 
     /// @dev Shared completion effects for confirmCompletion + claimAfterReview (CEI, no external call).
     function _settleCompletion(Job storage j, uint256 jobId) private {
+        // Escrow ALWAYS settles — money must move to the provider regardless of counterparties.
         j.status = JobStatus.Completed;
         j.completedAt = block.timestamp;
         pendingWithdrawals[j.provider] += j.escrowAmount;
 
         Skill storage s = skills[j.skillId];
-        s.totalInvocations += 1;
-        uint256 rep = s.reputationScore + REPUTATION_STEP;
-        s.reputationScore = rep > MAX_REPUTATION ? MAX_REPUTATION : rep;
 
-        // Self-deal guard (audit Abductive-2): only arm's-length jobs earn agent reputation. Applied
-        // identically on BOTH completion paths because both call _settleCompletion.
+        // Self-deal guard (audit Abductive-2; widened in Tier-0). A self-dealt job (requester ==
+        // provider) settles escrow but earns ZERO trust signals — NOT the skill reputationScore,
+        // NOT the invocation count, NOT agent reputation. Originally only agent reputation was
+        // guarded while reputationScore + totalInvocations bumped unconditionally; because the skill
+        // reputationScore drives the off-chain BM25 discovery boost (1.0..2.0x), a SINGLE wallet
+        // could self-deal price-0 jobs on its own skill to inflate its rank and drown real skills —
+        // strictly cheaper than the 2-wallet Trust-Gate farm. All earned signals are now gated
+        // identically, on BOTH completion paths because both call this function.
         if (j.requester != j.provider) {
+            s.totalInvocations += 1;
+            uint256 rep = s.reputationScore + REPUTATION_STEP;
+            s.reputationScore = rep > MAX_REPUTATION ? MAX_REPUTATION : rep;
             _bumpAgentRep(j.provider);
             _bumpAgentRep(j.requester);
         }
@@ -273,6 +293,52 @@ contract AgentSkillRegistry is ReentrancyGuard {
         (bool ok,) = payable(msg.sender).call{value: amount}("");
         require(ok, "transfer failed");
         emit Withdrawn(msg.sender, amount);
+    }
+
+    // ── Sybil-resistance bond (Tier-2, PD-007) ─────────────────
+    /// @notice Seed-eligible bond for an agent — `bondedAmount` while active, 0 while cooling down.
+    ///         Off-chain flow reputation reads this (log-capped) as the agent's trust seed.
+    function seedEligibleBond(address agent) external view returns (uint256) {
+        return bondUnlockAt[agent] == 0 ? bondedAmount[agent] : 0;
+    }
+
+    /// @notice Lock additional bond to seed your discovery reputation. Depositing re-activates a
+    ///         cooling-down bond (re-commits it as a seed).
+    function depositBond() external payable {
+        require(msg.value > 0, "no bond");
+        uint256 bonded = bondedAmount[msg.sender] + msg.value;
+        bondedAmount[msg.sender] = bonded;
+        bondUnlockAt[msg.sender] = 0; // active again
+        emit BondUpdated(msg.sender, bonded, bonded);
+    }
+
+    /// @notice Begin the unlock cooldown. The bond stops seeding immediately (seedEligible → 0).
+    function requestBondUnlock() external {
+        require(bondedAmount[msg.sender] > 0, "no bond");
+        require(bondUnlockAt[msg.sender] == 0, "already unlocking");
+        bondUnlockAt[msg.sender] = block.timestamp + BOND_UNLOCK_COOLDOWN;
+        emit BondUpdated(msg.sender, bondedAmount[msg.sender], 0);
+    }
+
+    /// @notice Cancel a pending unlock and re-activate the bond as a seed.
+    function cancelBondUnlock() external {
+        require(bondUnlockAt[msg.sender] != 0, "not unlocking");
+        bondUnlockAt[msg.sender] = 0;
+        emit BondUpdated(msg.sender, bondedAmount[msg.sender], bondedAmount[msg.sender]);
+    }
+
+    /// @notice After the cooldown, credit the full bond back to the pull-payment ledger (then call
+    ///         withdraw() to pull it). nonReentrant for defense-in-depth: consistent with all other
+    ///         fund-state-modifying functions and guards against future extensions.
+    function withdrawBond() external nonReentrant {
+        uint256 unlockAt = bondUnlockAt[msg.sender];
+        require(unlockAt != 0, "not unlocking");
+        require(block.timestamp >= unlockAt, "cooldown active");
+        uint256 amount = bondedAmount[msg.sender];
+        bondedAmount[msg.sender] = 0;
+        bondUnlockAt[msg.sender] = 0;
+        pendingWithdrawals[msg.sender] += amount; // reuse the audited pull-payment path
+        emit BondUpdated(msg.sender, 0, 0);
     }
 
     // ── Views for social graph / reputation ────────────────────

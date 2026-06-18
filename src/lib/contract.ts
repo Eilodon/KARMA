@@ -125,49 +125,7 @@ export function deriveTaskHash(requester: Address, skillId: bigint, nonce: bigin
   );
 }
 
-export interface JobReader {
-  getRequesterJobs: (requester: Address) => Promise<readonly bigint[]>;
-  getJobTaskHash: (jobId: bigint) => Promise<Hash>;
-}
 
-/** Returns an existing jobId carrying `taskHash`, or null if the request is new. */
-export async function findJobByTaskHash(
-  requester: Address,
-  taskHash: Hash,
-  reader: JobReader,
-): Promise<bigint | null> {
-  const jobIds = await reader.getRequesterJobs(requester);
-  const target = taskHash.toLowerCase();
-  for (const id of jobIds) {
-    const th = await reader.getJobTaskHash(id);
-    if (th.toLowerCase() === target) return id;
-  }
-  return null;
-}
-
-/** Production JobReader over the real Pharos clients (taskHash is jobs() tuple index 3). */
-export function makeOnchainJobReader(): JobReader {
-  const publicClient = getPublicClient();
-  const address = getContractAddress();
-  return {
-    getRequesterJobs: (requester) =>
-      publicClient.readContract({
-        address,
-        abi: agentSkillRegistryAbi,
-        functionName: "getRequesterJobs",
-        args: [requester],
-      }),
-    getJobTaskHash: async (jobId) => {
-      const job = await publicClient.readContract({
-        address,
-        abi: agentSkillRegistryAbi,
-        functionName: "jobs",
-        args: [jobId],
-      });
-      return job[3]; // tuple index 3 = taskHash (bytes32)
-    },
-  };
-}
 
 /** Production wiring of runBoundedWrite over the real Pharos clients. */
 export async function writeContractBounded(
@@ -210,7 +168,9 @@ export async function writeContractBounded(
 export type IndexedEvent =
   | { type: "SkillRegistered"; blockNumber: bigint; skillId: bigint; owner: Address; name: string; pricePerCall: bigint }
   | { type: "SkillDeactivated"; blockNumber: bigint; skillId: bigint }
-  | { type: "JobCompleted"; blockNumber: bigint; jobId: bigint; provider: Address; payout: bigint; newReputation: bigint };
+  | { type: "JobCompleted"; blockNumber: bigint; jobId: bigint; provider: Address; payout: bigint; newReputation: bigint }
+  | { type: "BondUpdated"; blockNumber: bigint; agent: Address; bondedAmount: bigint; seedEligible: bigint }
+  | { type: "MinReputationSet"; blockNumber: bigint; skillId: bigint; minReputation: bigint };
 
 export interface IndexerWatchHandlers {
   onLogs: (events: IndexedEvent[]) => void;
@@ -397,6 +357,17 @@ export function mapLog(raw: unknown): IndexedEvent | null {
         type: "JobCompleted", blockNumber: bn,
         jobId: a.jobId as bigint, provider: a.provider as Address,
         payout: a.payout as bigint, newReputation: a.newReputation as bigint,
+      };
+    case "BondUpdated":
+      return {
+        type: "BondUpdated", blockNumber: bn,
+        agent: a.agent as Address,
+        bondedAmount: a.bondedAmount as bigint, seedEligible: a.seedEligible as bigint,
+      };
+    case "MinReputationSet":
+      return {
+        type: "MinReputationSet", blockNumber: bn,
+        skillId: a.skillId as bigint, minReputation: a.minReputation as bigint,
       };
     default:
       return null;

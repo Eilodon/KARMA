@@ -15,6 +15,9 @@ contract AgentSkillRegistryTest is Test {
     bytes32 internal constant TASK_HASH = keccak256("task-params");
     bytes32 internal constant RESULT_HASH = keccak256("result-data");
 
+    // Mirror of the contract event so tests can vm.expectEmit it (Tier-2 bond).
+    event BondUpdated(address indexed agent, uint256 bondedAmount, uint256 seedEligible);
+
     function setUp() public {
         reg = new AgentSkillRegistry(3 days); // DEFAULT_REVIEW_WINDOW
         vm.deal(beta, 10 ether);
@@ -233,7 +236,7 @@ contract AgentSkillRegistryTest is Test {
         assertEq(minRep, 70, "owner updated threshold");
     }
 
-    // ── Abductive-2: self-deal must not farm agent reputation (both completion paths) ──
+    // ── Abductive-2 + Tier-0: self-deal must not farm ANY trust signal (both completion paths) ──
     function test_SelfDeal_NoRepFarm() public {
         vm.prank(alpha);
         uint256 skillId = reg.registerSkill("self", "self", "mcp://alpha", PRICE, 0);
@@ -256,6 +259,35 @@ contract AgentSkillRegistryTest is Test {
         vm.prank(alpha);
         reg.claimAfterReview(j2);
         assertEq(reg.agentReputation(alpha), 50, "self-deal claim grants no agent rep");
+
+        // Tier-0: neither self-deal path may inflate the skill's discovery signals. reputationScore
+        // drives the off-chain BM25 boost (1.0..2.0x); totalInvocations is shown as social proof.
+        // Both stay at base despite two completed self-jobs — escrow settled, no trust manufactured.
+        (, , , , , uint256 reputation, uint256 invocations, , , ) = reg.skills(skillId);
+        assertEq(reputation, 50, "self-deal must not inflate skill reputation (BM25 boost input)");
+        assertEq(invocations, 0, "self-deal must not inflate invocation count");
+    }
+
+    // ── Tier-0 regression: single-wallet discovery-rank pump is neutralized ──
+    // Pre-fix, reputationScore bumped unconditionally, so ONE wallet could self-deal price-0 jobs on
+    // its own skill, driving reputationScore -> 100 (BM25 boost 2.0x) to drown real skills at zero
+    // capital. Now self-deals earn nothing, so the rank cannot be pumped from a closed Sybil set.
+    function test_SelfDeal_NoDiscoveryRankPump() public {
+        vm.prank(alpha);
+        uint256 skillId = reg.registerSkill("pump", "pump", "mcp://alpha", 0, 0); // price 0 = zero capital
+
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(alpha);
+            uint256 jobId = reg.createJob{value: 0}(skillId, keccak256(abi.encode("pump", i)), DEADLINE_SECS);
+            vm.prank(alpha);
+            reg.deliverResult(jobId, RESULT_HASH);
+            vm.prank(alpha);
+            reg.confirmCompletion(jobId);
+        }
+
+        (, , , , , uint256 reputation, uint256 invocations, , , ) = reg.skills(skillId);
+        assertEq(reputation, 50, "5 self-deals cannot raise skill reputation above base");
+        assertEq(invocations, 0, "self-deals never count as invocations");
     }
 
     // ── PD-003: O(1) dedup index ───────────────────────────────
@@ -340,6 +372,100 @@ contract AgentSkillRegistryTest is Test {
         // Attacker must receive escrow exactly once; registry not drained.
         assertEq(address(attacker).balance, PRICE, "attacker paid exactly once");
         assertEq(address(reg).balance, 0, "registry fully settled, not drained");
+    }
+
+    // ── Tier-2 Sybil-resistance bond (PD-007) ──────────────────
+    function test_Bond_DepositSeedsAndIsPerAgent() public {
+        vm.expectEmit(true, false, false, true);
+        emit BondUpdated(alpha, 2 ether, 2 ether);
+        vm.prank(alpha);
+        reg.depositBond{value: 2 ether}();
+
+        assertEq(reg.bondedAmount(alpha), 2 ether, "bond locked");
+        assertEq(reg.seedEligibleBond(alpha), 2 ether, "active bond seeds");
+        assertEq(reg.bondedAmount(beta), 0, "bond is per-agent: alpha's does not seed beta");
+        assertEq(reg.seedEligibleBond(beta), 0, "no bond means no seed (open, no paywall)");
+    }
+
+    function test_Bond_DepositZeroReverts() public {
+        vm.prank(alpha);
+        vm.expectRevert(bytes("no bond"));
+        reg.depositBond{value: 0}();
+    }
+
+    function test_Bond_RequestUnlockStopsSeedingButKeepsCapitalLocked() public {
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        vm.prank(alpha);
+        reg.requestBondUnlock();
+        // Flash-seed defense: seed weight drops to 0 immediately, but the capital stays locked.
+        assertEq(reg.seedEligibleBond(alpha), 0, "cooling-down bond does not seed");
+        assertEq(reg.bondedAmount(alpha), 1 ether, "capital still locked across the cooldown");
+    }
+
+    function test_Bond_WithdrawBeforeCooldownReverts() public {
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        vm.prank(alpha);
+        reg.requestBondUnlock();
+        vm.warp(block.timestamp + reg.BOND_UNLOCK_COOLDOWN() - 1);
+        vm.prank(alpha);
+        vm.expectRevert(bytes("cooldown active"));
+        reg.withdrawBond();
+    }
+
+    function test_Bond_WithdrawWithoutRequestReverts() public {
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        vm.prank(alpha);
+        vm.expectRevert(bytes("not unlocking"));
+        reg.withdrawBond();
+    }
+
+    function test_Bond_WithdrawAfterCooldownReturnsCapitalViaPullPayment() public {
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        vm.prank(alpha);
+        reg.requestBondUnlock();
+        vm.warp(block.timestamp + reg.BOND_UNLOCK_COOLDOWN());
+        vm.prank(alpha);
+        reg.withdrawBond();
+        assertEq(reg.bondedAmount(alpha), 0, "bond cleared");
+        assertEq(reg.pendingWithdrawals(alpha), 1 ether, "credited to the audited pull-payment ledger");
+
+        uint256 balBefore = alpha.balance;
+        vm.prank(alpha);
+        reg.withdraw();
+        assertEq(alpha.balance, balBefore + 1 ether, "bond returned to the agent");
+    }
+
+    function test_Bond_CancelUnlockReactivatesSeed() public {
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        vm.prank(alpha);
+        reg.requestBondUnlock();
+        assertEq(reg.seedEligibleBond(alpha), 0, "not seeding while cooling");
+        vm.prank(alpha);
+        reg.cancelBondUnlock();
+        assertEq(reg.seedEligibleBond(alpha), 1 ether, "seeding again after cancel");
+    }
+
+    function test_Bond_DepositDuringCooldownReactivatesAndAdds() public {
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        vm.prank(alpha);
+        reg.requestBondUnlock();
+        vm.prank(alpha);
+        reg.depositBond{value: 1 ether}();
+        assertEq(reg.bondedAmount(alpha), 2 ether, "added to the existing bond");
+        assertEq(reg.seedEligibleBond(alpha), 2 ether, "re-committed: seeds the full amount");
+        assertEq(reg.bondUnlockAt(alpha), 0, "pending unlock cleared by re-deposit");
+    }
+
+    function test_Bond_RequestUnlockWithoutBondReverts() public {
+        vm.prank(beta);
+        vm.expectRevert(bytes("no bond"));
+        reg.requestBondUnlock();
     }
 }
 

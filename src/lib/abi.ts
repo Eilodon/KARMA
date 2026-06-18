@@ -17,6 +17,7 @@ export const agentSkillRegistryAbi = [
   { type: "function", name: "MIN_REVIEW_WINDOW", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { type: "function", name: "REPUTATION_STEP", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { type: "function", name: "REVIEW_WINDOW", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "BOND_UNLOCK_COOLDOWN", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
 
   // ── public array-mapping getters (index access) ──
   { type: "function", name: "agentProviderJobs", stateMutability: "view", inputs: [{ name: "", type: "address" }, { name: "", type: "uint256" }], outputs: [{ name: "", type: "uint256" }] },
@@ -80,6 +81,15 @@ export const agentSkillRegistryAbi = [
     ],
   },
 
+  // ── Sybil-resistance bond (Tier-2) ──
+  { type: "function", name: "bondedAmount", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "bondUnlockAt", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "seedEligibleBond", stateMutability: "view", inputs: [{ name: "agent", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "depositBond", stateMutability: "payable", inputs: [], outputs: [] },
+  { type: "function", name: "requestBondUnlock", stateMutability: "nonpayable", inputs: [], outputs: [] },
+  { type: "function", name: "cancelBondUnlock", stateMutability: "nonpayable", inputs: [], outputs: [] },
+  { type: "function", name: "withdrawBond", stateMutability: "nonpayable", inputs: [], outputs: [] },
+
   // ── pull-payment ──
   { type: "function", name: "withdraw", stateMutability: "nonpayable", inputs: [], outputs: [] },
 
@@ -93,4 +103,5 @@ export const agentSkillRegistryAbi = [
   { type: "event", name: "ResultDisputed", inputs: [{ name: "jobId", type: "uint256", indexed: true }, { name: "requester", type: "address", indexed: true }, { name: "amount", type: "uint256", indexed: false }] },
   { type: "event", name: "MinReputationSet", inputs: [{ name: "skillId", type: "uint256", indexed: true }, { name: "minReputation", type: "uint256", indexed: false }] },
   { type: "event", name: "Withdrawn", inputs: [{ name: "who", type: "address", indexed: true }, { name: "amount", type: "uint256", indexed: false }] },
+  { type: "event", name: "BondUpdated", inputs: [{ name: "agent", type: "address", indexed: true }, { name: "bondedAmount", type: "uint256", indexed: false }, { name: "seedEligible", type: "uint256", indexed: false }] },
 ] as const;

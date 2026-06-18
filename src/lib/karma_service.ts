@@ -83,6 +83,8 @@ export interface KarmaService {
   indexUpsert(doc: SkillDocument): void;
   /** Remove a skill from the discovery index (e.g. on SkillDeactivated). */
   indexDiscard(skillId: number): void;
+  /** Update a skill's Trust Gate threshold in-place — no RPC, survives restart via MinReputationSet replay. */
+  indexSetMinReputation(skillId: number, threshold: number): void;
   search(query: string, opts: SkillSearchOptions): SkillSearchHit[];
   /** First indexed skill doc for an owner (reputation source, 0 RPC), or null. */
   getByOwner(addr: Address): SkillDocument | null;
@@ -213,6 +215,7 @@ export const realKarmaService: KarmaService = {
 
   indexUpsert: (doc) => skillIndex.upsert(doc),
   indexDiscard: (skillId) => skillIndex.discard(skillId),
+  indexSetMinReputation: (skillId, threshold) => skillIndex.setMinReputation(skillId, threshold),
   search: (query, opts) => skillIndex.search(query, opts),
   getByOwner: (addr) => skillIndex.getByOwner(addr),
   getSkillThreshold: (skillId) => skillIndex.getThreshold(Number(skillId)),

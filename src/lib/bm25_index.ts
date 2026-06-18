@@ -57,6 +57,16 @@ function sanitizeDoc(doc: SkillDocument): SkillDocument {
   };
 }
 
+/** Maps a stored skill doc to a ranking boost factor (≥0; 1 = neutral). Pluggable so discovery can
+ *  swap the self-inflatable on-chain counter for Tier-1 flow reputation without touching BM25. */
+export type SkillBoost = (doc: SkillDocument) => number;
+
+/** Legacy boost: on-chain skill reputationScore 0..100 → factor 1.0..2.0. Self-inflatable by a Sybil
+ *  ring (see PD-007); kept as the default until Tier-1 flow reputation is wired + validated. */
+export function legacyReputationBoost(doc: SkillDocument): number {
+  return 1 + (doc.reputation_score ?? 0) / 100;
+}
+
 export interface SkillSearchHit {
   skill_id: number;
   name: string;
@@ -80,6 +90,9 @@ export class BM25SkillIndex {
   // MiniSearch can't enumerate by a stored field, so we keep a parallel id→doc map to answer
   // getByOwner() without an RPC. Kept in lockstep with the index in upsert()/discard().
   private readonly byId = new Map<number, SkillDocument>();
+  // Ranking boost source. Defaults to the legacy on-chain-counter boost; setBoost() swaps in Tier-1
+  // flow reputation. Kept on the index (not search()) so the swap is a one-liner and fully reversible.
+  private boost: SkillBoost = legacyReputationBoost;
 
   constructor() {
     this.ms = new MiniSearch<SkillDocument>({
@@ -133,6 +146,21 @@ export class BM25SkillIndex {
     return this.byId.get(skillId) ?? null;
   }
 
+  /** Swap the ranking boost source (Tier-1 flow reputation); null restores the legacy boost. */
+  setBoost(fn: SkillBoost | null): void {
+    this.boost = fn ?? legacyReputationBoost;
+  }
+
+  /** Persist an on-chain MinReputationSet update without a full skill re-read (closes the
+   *  post-restart Trust Gate gap — replays MinReputationSet events restore thresholds). */
+  setMinReputation(skillId: number, threshold: number): void {
+    const existing = this.byId.get(skillId);
+    if (!existing) return; // not yet in index — SkillRegistered will arrive in replay order
+    const updated = { ...existing, min_reputation_to_invoke: threshold };
+    if (this.ms.has(skillId)) this.ms.replace(updated);
+    this.byId.set(skillId, updated);
+  }
+
   /**
    * Trust Gate (Phase 1) requester reputation: the max on-chain reputation across the skills
    * `ownerAddress` owns, or 0 if it owns none (⇒ blocked by any threshold > 0). Index-derived,
@@ -160,10 +188,7 @@ export class BM25SkillIndex {
 
   search(query: string, opts: SkillSearchOptions = {}): SkillSearchHit[] {
     const results = this.ms.search(query, {
-      boostDocument: (_id, _term, stored) => {
-        const rep = Number((stored as { reputation_score?: number } | undefined)?.reputation_score ?? 0);
-        return 1 + rep / 100; // reputation 0..100 → boost factor 1.0..2.0
-      },
+      boostDocument: (_id, _term, stored) => this.boost(stored as unknown as SkillDocument),
       filter: (r) => {
         const row = r as unknown as SkillDocument;
         if (!row.active) return false;

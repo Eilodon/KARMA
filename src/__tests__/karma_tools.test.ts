@@ -59,6 +59,7 @@ function fakeService(over: Partial<KarmaService> = {}): KarmaService {
     withdraw: vi.fn(async () => ({ amount: 100_000_000_000_000n, outcome: confirmed })),
     indexUpsert: vi.fn(),
     indexDiscard: vi.fn(),
+    indexSetMinReputation: vi.fn(),
     getByOwner: vi.fn(() => null),
     getSkillThreshold: vi.fn(() => 0), // default: no Trust Gate
     getReputation: vi.fn(() => 0),

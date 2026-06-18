@@ -55,6 +55,19 @@ describe("P5.1 BM25SkillIndex", () => {
     expect(hits[0]?.skill_id).toBe(11);
   });
 
+  it("setBoost swaps the ranking boost source (Tier-1 seam); null restores legacy", () => {
+    idx.upsert(mkSkill({ skill_id: 70, name: "summarize text", description: "summarize", reputation_score: 50, owner_address: "0xAaa" }));
+    idx.upsert(mkSkill({ skill_id: 71, name: "summarize text", description: "summarize", reputation_score: 95, owner_address: "0xBbb" }));
+    // legacy boost: higher on-chain reputation_score (71) wins the tie
+    expect(idx.search("summarize")[0]?.skill_id).toBe(71);
+    // a flow boost favouring owner 0xaaa flips the order despite its lower on-chain reputation
+    idx.setBoost((doc) => (doc.owner_address.toLowerCase() === "0xaaa" ? 5 : 1));
+    expect(idx.search("summarize")[0]?.skill_id).toBe(70);
+    // null restores the legacy boost
+    idx.setBoost(null);
+    expect(idx.search("summarize")[0]?.skill_id).toBe(71);
+  });
+
   it("filters out skills priced above maxPriceWei using BigInt (no Number precision loss)", () => {
     idx.upsert(mkSkill({ skill_id: 20, name: "cheap translate", description: "translate", price_per_call_wei: "1000" }));
     idx.upsert(mkSkill({ skill_id: 21, name: "premium translate", description: "translate", price_per_call_wei: "9999999999999999999999" }));
