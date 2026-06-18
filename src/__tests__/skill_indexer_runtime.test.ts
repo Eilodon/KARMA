@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   applyIndexedEvent,
+  applyWithRetry,
   skillDocFromChain,
   getKarmaIndexerHealth,
   makeFlowHybridBoost,
@@ -208,5 +209,35 @@ describe("skill_indexer_runtime", () => {
 
   it("getKarmaIndexerHealth reports started=false when the indexer was never wired", () => {
     expect(getKarmaIndexerHealth()).toEqual({ started: false });
+  });
+});
+
+// applyWithRetry: transient-RPC retry + exhaustion behaviour
+describe("applyWithRetry", () => {
+  const regEvent: IndexedEvent = {
+    type: "SkillRegistered", blockNumber: 1n, skillId: 1n, owner: ALPHA, name: "x", pricePerCall: 1000n,
+  };
+
+  it("succeeds on first attempt with no retries needed", async () => {
+    const svc = fakeService({ readSkill: vi.fn(async () => skill()) });
+    await expect(applyWithRetry(svc, regEvent, undefined, 2, 0)).resolves.toBeUndefined();
+    expect(svc.readSkill).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on transient RPC failure and succeeds on 2nd attempt", async () => {
+    const svc = fakeService({
+      readSkill: vi.fn()
+        .mockRejectedValueOnce(new Error("RPC timeout"))
+        .mockResolvedValue(skill()),
+    });
+    await expect(applyWithRetry(svc, regEvent, undefined, 2, 0)).resolves.toBeUndefined();
+    expect(svc.readSkill).toHaveBeenCalledTimes(2); // 1 fail + 1 success
+  });
+
+  it("throws after maxRetries exhausted (3 total attempts for maxRetries=2)", async () => {
+    const rpcErr = new Error("persistent RPC down");
+    const svc = fakeService({ readSkill: vi.fn().mockRejectedValue(rpcErr) });
+    await expect(applyWithRetry(svc, regEvent, undefined, 2, 0)).rejects.toThrow("persistent RPC down");
+    expect(svc.readSkill).toHaveBeenCalledTimes(3); // attempt 0 + 2 retries
   });
 });

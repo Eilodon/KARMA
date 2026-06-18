@@ -100,7 +100,34 @@ export function makeFlowHybridBoost(flowSrc: { boostFor(addr: string): number })
   return (doc) => Math.max(legacyReputationBoost(doc), flowSrc.boostFor(doc.owner_address));
 }
 
+const MAX_RECONCILE_RETRIES = 3;
+const RECONCILE_RETRY_BASE_MS = 200;
+
+/** Retry wrapper for applyIndexedEvent: retries up to maxRetries times on any thrown error
+ *  (transient RPC failures — 429, timeout, brief outage) with exponential backoff.
+ *  Exported so it can be unit-tested independently of the indexer singleton. */
+export async function applyWithRetry(
+  svc: KarmaService,
+  e: IndexedEvent,
+  flow?: { record(edge: FlowEdge): void; setBondSeed(agent: string, bondWei: bigint): void },
+  maxRetries = MAX_RECONCILE_RETRIES,
+  baseDelayMs = RECONCILE_RETRY_BASE_MS,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await applyIndexedEvent(svc, e, flow);
+      return;
+    } catch (err) {
+      if (attempt >= maxRetries) throw err;
+      await new Promise<void>((r) => setTimeout(r, baseDelayMs * 2 ** attempt));
+    }
+  }
+}
+
 let indexer: SkillEventIndexer | undefined;
+/** Cumulative count of events that exhausted all retries and were dropped this session.
+ *  Surfaced via getKarmaIndexerHealth() so operators can detect in-session BM25 drift. */
+let reconcileErrors = 0;
 /** Tier-1 flow-reputation source, created only when KARMA_DISCOVERY_RANK=flow. Holds the live edge
  *  graph + cached boosts; wired into skillIndex.setBoost so discovery ranks by propagated trust. */
 let flowBoost: FlowBoostSource | undefined;
@@ -128,22 +155,27 @@ export function startKarmaIndexer(
   }
   let chain: Promise<void> = Promise.resolve();
   indexer = startSkillIndexer((e) => {
-    chain = chain.then(() => applyIndexedEvent(svc, e, flowBoost)).catch((err) => {
-      console.error(`[KARMA] skill-index reconcile failed for ${e.type}:`, err);
+    chain = chain.then(() => applyWithRetry(svc, e, flowBoost)).catch((err) => {
+      reconcileErrors++;
+      console.error(`[KARMA] skill-index reconcile failed for ${e.type} (after ${MAX_RECONCILE_RETRIES} retries):`, err);
     });
   }, fromBlock);
   return indexer;
 }
 
-/** Indexer health for karma_health, or a not-started marker when the indexer was never wired. */
-export function getKarmaIndexerHealth(): IndexerHealth | { started: false } {
-  return indexer ? indexer.health() : { started: false };
+/** Indexer health for karma_health, or a not-started marker when the indexer was never wired.
+ *  `reconcileErrors` counts events that exhausted all retries this session — non-zero means
+ *  in-session BM25 drift; a restart (full backfill) recovers the missed events. */
+export function getKarmaIndexerHealth(): (IndexerHealth & { reconcileErrors: number }) | { started: false } {
+  if (!indexer) return { started: false };
+  return { ...indexer.health(), reconcileErrors };
 }
 
 /** Stop and clear the indexer (graceful shutdown / test reset). Restores the legacy boost. */
 export function stopKarmaIndexer(): void {
   indexer?.stop();
   indexer = undefined;
+  reconcileErrors = 0;
   if (flowBoost) {
     skillIndex.setBoost(null);
     flowBoost = undefined;
