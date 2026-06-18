@@ -6,7 +6,7 @@ The system has three layers:
 
 - **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
 - **Layer 1 — KARMA plugin (`karma.tool.ts`):** Thirteen MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm, plus dispute / claim-after-review and single-job reads for reconciliation), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process and every tool is bound to the caller's tenant (STRIDE-S).
-- **Layer 2 — `AgentSkillRegistry` contract (v3):** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, on-chain Trust Gate, and withdrawals. Verified live at [`0xc6d5c146…b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae).
+- **Layer 2 — `AgentSkillRegistry` contract (v3):** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, on-chain Trust Gate, and withdrawals. Verified live at [`0x0680…79b4`](https://atlantic.pharosscan.xyz/address/0x068091d8b982379373a4db377872ffb608a979b4).
 
 > Package: `karma`
 > Runtime entrypoint: `dist/index.js`
@@ -84,15 +84,15 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 - Thirteen in-process tools over the `KarmaService` DI seam: `karma_health`, `register_skill`, `discover_skills`, `create_job`, `deliver_result`, `complete_job`, `dispute_result`, `claim_after_review`, `read_job`, `get_agent_reputation`, `query_social_graph`, `get_pending_balance`, `withdraw_balance`. Lifecycle writes (`deliver_result`/`complete_job`/`dispute_result`/`claim_after_review`) read the job first and return a graceful `already_done` / `unexpected_state` instead of an opaque revert when a timed-out tx actually mined (R2/ADR-2 idempotency); `read_job` lets an agent reconcile a job by id. Every tool that resolves a signing account threads the caller's `tenantId` (`getRequestContext()`) into `KarmaService.account/addressOf`, which fails closed via `KeystoreManager.assertOwnedBy` (STRIDE-S tenant→agent isolation).
 - Web3 Secret Storage v3 keystore (`KeystoreManager`): scrypt + aes-128-ctr in-process decrypt. Private keys never exposed — only viem `Account` objects.
 - In-process BM25 skill index (`BM25SkillIndex` via MiniSearch): reputation-boosted ranking, BigInt-safe price/reputation filters, prompt-injection-resistant text sanitization.
-- `SkillEventIndexer`: paginated backfill (max `KARMA_INDEXER_BLOCK_RANGE` blocks per `eth_getLogs` call, default 2000) + live-watch + reconnect with capped exponential backoff; unhandled rejections caught by a last-resort `process.on("unhandledRejection")` net in `src/index.ts`. Started at server boot by `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`), which reconciles chain events into the BM25 index (SkillRegistered → hydrate+upsert, SkillDeactivated → discard, JobCompleted → refresh that skill's reputation, BondUpdated → mirror seed-eligible bond). Health state (`lastIndexedBlock`, `lastEventAt`, `watching`, `lastError`, `reconnectAttempts`) is surfaced through `karma_health` (`indexer` field).
+- `SkillEventIndexer`: paginated backfill (max `KARMA_INDEXER_BLOCK_RANGE` blocks per `eth_getLogs` call, default 2000) + live-watch + reconnect with capped exponential backoff; unhandled rejections caught by a last-resort `process.on("unhandledRejection")` net in `src/index.ts`. Started at server boot by `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`), which reconciles chain events into the BM25 index (SkillRegistered → hydrate+upsert, SkillDeactivated → discard, JobCompleted → use authoritative `newReputation` from event + record flow edge, BondUpdated → mirror seed-eligible bond, MinReputationSet → persist Trust Gate threshold so it survives restarts). Health state (`lastIndexedBlock`, `lastEventAt`, `watching`, `lastError`, `reconnectAttempts`) is surfaced through `karma_health` (`indexer` field).
 - Bounded write helper: exactly-once broadcast with `RECEIPT_TIMEOUT_MS=300_000 < MCP_LOCK_TTL_MS=420_000`. Timeout → `pending` outcome; never resend.
 - Exactly-once job guard: `deriveTaskHash(requester, skillId, nonce)` → check-before-write via the on-chain `jobByTaskHash` mapping (O(1), v3; PD-003). No double-escrow on lost-ACK retry.
 - All `uint256` amounts and IDs cross the MCP boundary as decimal strings (`jsonSafe`, D-6).
 
 ### Layer 2 — AgentSkillRegistry contract (live on Pharos Atlantic)
 
-- Deployed (v3): [`0xc6d5c146209e0833634bd33fafb9e65081b905ae`](https://atlantic.pharosscan.xyz/address/0xc6d5c146209e0833634bd33fafb9e65081b905ae)
-- Deploy tx: [`0x6946560a…b73cf5`](https://atlantic.pharosscan.xyz/tx/0x6946560ac9ae8dfeb535ad9ca45e6988eb76513876eff83afcfd9ff029b73cf5) (block 24360873, gas 1,773,609). The v2 contract is superseded.
+- Deployed (v3): [`0x068091d8b982379373a4db377872ffb608a979b4`](https://atlantic.pharosscan.xyz/address/0x068091d8b982379373a4db377872ffb608a979b4)
+- Deploy block: 24406554 (Pharos Atlantic, 2026-06-18). The v2 contract (`0xc6d5c146…b905ae`, block 24360873) is superseded.
 - v3 escrow resolution (no permanent fund lock): `deliverResult` opens a `REVIEW_WINDOW` (3 days); the requester may `confirmCompletion` any time, `disputeResult` within the window (refund), or — if the requester ghosts — the provider may `claimAfterReview` after the window.
 - On-chain Trust Gate: `Skill.minReputationToInvoke` + lazy-base-50 `agentReputation` (earned only on arm's-length completions); `createJob` reverts below the threshold.
 - Reputation: BASE=50, MAX=100, STEP=5, REVIEW_WINDOW=3 days (matches the 34 Foundry tests).
@@ -445,7 +445,9 @@ The in-process `BM25SkillIndex` (powered by MiniSearch) is rebuilt from chain ev
 
 - `SkillRegistered` → `upsert(doc)` (sanitized name/description).
 - `SkillDeactivated` → `discard(skillId)`.
+- `JobCompleted` → upsert with authoritative `newReputation` from event (not stale RPC re-read); also records arm's-length flow endorsement edge.
 - `BondUpdated` → mirror seed-eligible bond into flow reputation (Tier-2).
+- `MinReputationSet` → update `min_reputation_to_invoke` in the BM25 doc so Trust Gate thresholds survive indexer restarts.
 - Ranking blends BM25 text score with on-chain `reputationScore` (0–100 → boost factor 1.0–2.0).
 - Price and reputation filters compare using `BigInt`/`Number` — no coercion of `uint256` through a JS number.
 - Skill name/description is sanitized before indexing: control characters, zero-width characters, BiDi overrides, and BOM are stripped; whitespace is collapsed; length is capped at 2000 characters. This prevents attacker-controlled skill metadata from smuggling hidden instructions to a discovering agent.
@@ -1194,6 +1196,7 @@ All Layer 0 configuration is read in `src/config/env.ts`. KARMA app-layer env va
 | `KARMA_INDEXER_FROM_BLOCK` | `0` | Block the `SkillEventIndexer` backfills from on boot. Set to the contract deploy block after a (re)deploy to skip stale history. |
 | `KARMA_INDEXER_BLOCK_RANGE` | `2000` | Maximum block window per `eth_getLogs` call during indexer backfill. Prevents oversized requests on a genesis or long catch-up backfill. |
 | `KARMA_DISCOVERY_RANK` | `bm25` | Set to `flow` to enable Tier-1 Flow Reputation ranking for discovery (requires bond seed). |
+| `KARMA_FLOW_MAX_EDGES` | `500000` | Maximum edges retained by `FlowReputationGraph` (DoS cap). Raised from 50k; increase for denser long-window graphs. |
 | `DEMO_PRICE_WEI` | `100000000000000` | Default skill price for `run_demo.ts`. |
 
 ### HTTP security
@@ -1357,7 +1360,8 @@ pnpm audit --audit-level=high
 | `migrate_to_v2.test.ts` | Pure `planMigration` v1→v2 filter/sort/threshold-default. |
 | `execution_pipeline_error_redaction.test.ts` | `toClientError` redaction (incl. private-key hex) + `isTenantMismatchError` (PD-006). |
 | `karma_indexer.test.ts` | `SkillEventIndexer` backfill, reconnect, heartbeat state machine. |
-| `skill_indexer_runtime.test.ts` | Chain-event → BM25 reconciliation (`applyIndexedEvent`) and indexer-health surfacing. |
+| `skill_indexer_runtime.test.ts` | Chain-event → BM25 reconciliation (`applyIndexedEvent`), indexer-health surfacing, and hybrid boost (`makeFlowHybridBoost`). |
+| `flow_reputation.test.ts` | `FlowReputationGraph` / `FlowBoostSource` / `computeFlowReputation`: determinism, value-weighting, decay, saturation, Sybil-ring crush, bond seed, DoS cap (`DEFAULT_MAX_FLOW_EDGES`). |
 | `karma_plugin_health.test.ts` | `karma_health` tool: env detection, in-process flag. |
 | `karma_tools.test.ts` | All 13 economy tools over a fake `KarmaService`; tenant threading + on-chain Trust Gate + fan-out cap. |
 | `karma_write_helper.test.ts` | `runBoundedWrite` confirmed/pending/revert paths. |
@@ -1417,7 +1421,7 @@ Documented in `docs/superpowers/pattern-debt.md`.
 | `PD-004` — skill indexer has no persisted checkpoint | **Open** | `SkillEventIndexer` backfills from `KARMA_INDEXER_FROM_BLOCK` (or 0) on every boot — no persisted `lastIndexedBlock`. Low-payoff on a fresh testnet; revisit at scale / multi-instance. |
 | `PD-005` — Trust Gate was app-layer advisory | **Resolved** (2026-06-17, v3 live) | On-chain `agentReputation` + `Skill.minReputationToInvoke` + `createJob` require — consensus-enforced. Residual: wash-trade resistance needs stake/identity (out of scope). |
 | `PD-006` — no tenant-mismatch alarm signal | **Resolved** (2026-06-17) | The pipeline classifies `isTenantMismatchError` and emits a distinct `tenant_agent_mismatch` telemetry event for security monitoring. |
-| `PD-007` — Reputation farmable by wallet ring | **Open** | Tier-0 (1-wallet) fixed on-chain. Tier-1 (flow rep) and Tier-2 (bond) shipped in source but deferred to next redeploy + flag activation. |
+| `PD-007` — Reputation farmable by wallet ring | **Resolved (2026-06-18)** | Tier-0 (self-deal guard widened to `reputationScore` + `totalInvocations`), Tier-1 (`KARMA_DISCOVERY_RANK=flow` EigenTrust-lite ranking via `flow_reputation.ts`), and Tier-2 (per-agent bond, 7-day cooldown, agent-alpha seeded 0.005 PHRS) all live on v3. |
 | `PD-008` — No quality-slashing of Sybil bonds | **Open** | Sybil bonds are capital lock-ups but not quality-slashed on dispute (deferred by design). |
 
 Non-goals intentionally preserved:
