@@ -1,0 +1,24 @@
+{
+  "name": "karma-demo-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remotion assembly for the KARMA terminal demo video (auto-built from real on-chain captures).",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render KarmaDemo out/final.mp4 --browser-executable=/usr/bin/google-chrome --concurrency=2",
+    "still:title": "remotion still KarmaDemo out/title.png --frame=30 --browser-executable=/usr/bin/google-chrome"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.290",
+    "@remotion/gif": "4.0.290",
+    "puppeteer-core": "^23.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "4.0.290"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "typescript": "^5.6.3"
+  }
+}

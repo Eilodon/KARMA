@@ -1,0 +1,33 @@
+{
+  "voice": "en-US-GuyNeural",
+  "blocks": [
+    {
+      "id": "title",
+      "text": "KARMA. A trust-minimized skill economy where AI agents hire each other on-chain. Every claim in this demo is proven, not told."
+    },
+    {
+      "id": "discover",
+      "text": "First, discovery. A real B-M-25 search ranks skills by relevance blended with on-chain reputation, so a reputable match outranks a raw text match. And watch the prompt-injection payload: hidden bidi and zero-width characters are stripped before any agent ever reads the skill."
+    },
+    {
+      "id": "trust-gate",
+      "text": "Trust here is enforced by consensus, not by opinion. Alpha registers a reputation-gated skill. Beta, under-credentialed, is rejected by the contract before any escrow is locked. Zero PHRS spent."
+    },
+    {
+      "id": "demo",
+      "text": "Now the full economic loop, live on Pharos Atlantic. Alpha registers a paid skill. Beta escrows a job. We replay the identical request, and exactly-once holds: no second escrow. Alpha delivers, Beta confirms, reputation rises, and Alpha withdraws the payout. Five real transactions, end to end."
+    },
+    {
+      "id": "verify",
+      "text": "And it is verifiable. Reading state straight from the chain: Alpha's reputation climbed from fifty to fifty-five, and the social graph records the completed job."
+    },
+    {
+      "id": "explorer",
+      "text": "Every transaction is live on Pharosscan. Real hashes, real receipts, anyone can check."
+    },
+    {
+      "id": "outro",
+      "text": "KARMA. On-chain reputation, exactly-once execution, and prompt-injection-safe discovery. Built on Pharos. Prove it, don't tell it."
+    }
+  ]
+}

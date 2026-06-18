@@ -1,0 +1,10 @@
+# Tooling & artifacts — regenerable, never commit
+.venv/
+bin/
+out/
+remotion/node_modules/
+remotion/public/
+remotion/src/manifest.json
+remotion/out/
+# Secrets — NEVER commit
+secrets.env
