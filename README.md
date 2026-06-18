@@ -1,11 +1,13 @@
 # KARMA
 
-**KARMA** is a blockchain-backed AI agent skill economy built on top of **SUPER-MCP** — a hardened TypeScript / ESM framework for production-oriented [Model Context Protocol](https://modelcontextprotocol.io/) servers.
+> **Pharos Phase 1 — Skill Hackathon submission.** KARMA's 13 MCP tools are composable Skills — each callable by any Pharos agent. Phase 2 agents need a layer to register capabilities, discover each other, and settle payments on-chain. KARMA is that layer. Entry point: [SKILL.md](SKILL.md).
+
+**KARMA** is a blockchain-backed AI agent skill economy. The **SUPER-MCP** runtime (Layer 0) is bundled in this repository — `src/core/`, `src/mcp/`, `src/middlewares/`, `src/storage/` — a hardened TypeScript / ESM framework for production-oriented [Model Context Protocol](https://modelcontextprotocol.io/) servers.
 
 The system has three layers:
 
 - **Layer 0 — SUPER-MCP runtime:** stdio/HTTP transports, native Tasks, durable storage, authentication, request governance, output redaction, plugin isolation, pattern debt reporting.
-- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Thirteen MCP tools for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm, plus dispute / claim-after-review and single-job reads for reconciliation), reputation reading, social-graph queries, and balance withdrawals. Runs in-process as a trusted built-in; private keys never leave the process and every tool is bound to the caller's tenant (STRIDE-S).
+- **Layer 1 — KARMA plugin (`karma.tool.ts`):** Thirteen composable Skills (MCP tools) for skill registration, BM25 discovery, on-chain job lifecycle (escrow → deliver → confirm, plus dispute / claim-after-review and single-job reads for reconciliation), reputation reading, social-graph queries, and balance withdrawals. Each tool is callable by any Pharos agent. Runs in-process as a trusted built-in; private keys never leave the process and every tool is bound to the caller's tenant (STRIDE-S).
 - **Layer 2 — `AgentSkillRegistry` contract (v3):** Deployed Solidity escrow contract on Pharos Atlantic (`chainId=688689`). Manages skills, jobs, escrow, reputation, on-chain Trust Gate, and withdrawals. Verified live at [`0x0680…79b4`](https://atlantic.pharosscan.xyz/address/0x068091d8b982379373a4db377872ffb608a979b4).
 
 > Package: `karma`
@@ -17,7 +19,7 @@ The system has three layers:
 > Production storage requirement: Redis
 > Production HTTP auth requirement: JWT or OIDC JWKS, not API key
 
-KARMA intentionally does **not** claim to provide a true security sandbox for untrusted plugins — that remains a release-blocking epic (DEBT-001) until implemented with a real container/microVM/WASM runner. KMS-backed crypto-erasure (`smcp:v4:kms`) **shipped 2026-06-14** across Vault / AWS-KMS / GCP-KMS providers (DEBT-002 resolved); the only residual is AWS KMS's mandatory 7-day pending-deletion window.
+KARMA intentionally does **not** claim to provide a true security sandbox for untrusted **third-party** plugins — that remains a release-blocking epic (DEBT-001) until implemented with a real container/microVM/WASM runner. KARMA's own 13 tools run in-process as trusted built-ins; their network access is bound exclusively to `PHAROS_RPC_URL` (Pharos Atlantic RPC), private keys never leave in-process viem Account objects, and `assertInProcess()` blocks any attempt to load them through the external plugin runner. KMS-backed crypto-erasure (`smcp:v4:kms`) **shipped 2026-06-14** across Vault / AWS-KMS / GCP-KMS providers (DEBT-002 resolved); the only residual is AWS KMS's mandatory 7-day pending-deletion window.
 
 ---
 

@@ -1,0 +1,29 @@
+{
+  "networks": [
+    {
+      "name": "atlantic-testnet",
+      "rpcUrl": "https://atlantic.dplabs-internal.com",
+      "chainId": 688689,
+      "explorerUrl": "https://atlantic.pharosscan.xyz/",
+      "explorerApiUrl": "https://api.socialscan.io/pharos-atlantic-testnet",
+      "nativeToken": "PHRS",
+      "contracts": {
+        "AgentSkillRegistry": "0x068091d8b982379373a4db377872ffb608a979b4"
+      },
+      "deployBlock": 24406554
+    },
+    {
+      "name": "mainnet",
+      "rpcUrl": "https://rpc.pharos.xyz",
+      "chainId": 1672,
+      "explorerUrl": "https://www.pharosscan.xyz/",
+      "explorerApiUrl": "https://api.socialscan.io/pharos-mainnet",
+      "nativeToken": "PROS",
+      "contracts": {
+        "AgentSkillRegistry": null
+      },
+      "note": "KARMA contract not yet deployed on mainnet."
+    }
+  ],
+  "defaultNetwork": "atlantic-testnet"
+}
