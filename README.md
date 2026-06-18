@@ -328,7 +328,7 @@ Important implementation files:
 | `src/lib/karma_service.ts` | `KarmaService` interface (DI seam) + `realKarmaService` (live clients, keystore, index). |
 | `src/lib/keystore.ts` | `KeystoreManager` — Web3 v3 scrypt/aes-128-ctr decrypt; `encryptPrivateKeyV3` for keystore setup. |
 | `src/lib/serialize.ts` | `jsonSafe()` — recursive BigInt → decimal string (D-6). |
-| `src/lib/skill_indexer_runtime.ts` | `startKarmaIndexer` server-boot helper (singleton); `getKarmaIndexerHealth()` surfaces `IndexerHealth` to `karma_health`. |
+| `src/lib/skill_indexer_runtime.ts` | `startKarmaIndexer` server-boot helper (singleton); `getKarmaIndexerHealth()` surfaces `IndexerHealth` to `karma_health`; `skillDocFromChain` builds BM25 doc from on-chain state; `applyIndexedEvent` reconciles chain events into the index; `makeFlowHybridBoost` wires hybrid flow+legacy boost. |
 | `src/lib/types.ts` | `AgentIdentity`, `CryptoV3`, `KeystoreFileV3`, `SkillDocument`. |
 | `src/plugins/karma.tool.ts` | 13 KARMA tools; trusted in-process built-in; tenant-bound; `assertInProcess()` fail-fast. |
 | `src/plugins/system.tool.ts` | Built-in: `karma_ping`, `karma_pattern_debt`, `karma_test_long_task`. |
@@ -1566,4 +1566,3 @@ Recommended next work:
 - Run `pnpm migrate:encryption` once per tenant after enabling `KMS_PROVIDER` to re-encrypt all pre-V4 blobs before offering a formal erasure SLA.
 - Keep monitoring MCP TypeScript SDK public Tasks support before replacing the local adapter (`DEBT-003`, monitoring).
 - The `SkillEventIndexer` defaults to `fromBlock=0` on restart (full backfill); set `KARMA_INDEXER_FROM_BLOCK` to skip ahead. Add a *persisted* `lastIndexedBlock` checkpoint to reduce startup time automatically as the chain grows.
-- ✅ Done — `SkillEventIndexer.health()` is now wired into `karma_health` via `startKarmaIndexer` (`src/lib/skill_indexer_runtime.ts`); operators observe `lastIndexedBlock` / `lastEventAt` / `watching` without inspecting logs. The event-reconciliation logic (`applyIndexedEvent`) and the viem glue (`mapLog`/`buildViemIndexerDeps`) are unit-tested (`skill_indexer_runtime.test.ts`, `karma_indexer.test.ts`); only the trivial `startSkillIndexer` singleton resolution remains demo-only (`PD-002`, reduced).
