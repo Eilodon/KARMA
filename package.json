@@ -2,6 +2,7 @@
   "name": "karma",
   "version": "1.0.0",
   "description": "First use case of SUPER-MCP",
+  "license": "BUSL-1.1",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
