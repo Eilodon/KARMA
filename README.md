@@ -1,5 +1,19 @@
 # KARMA
 
+> **T3ADK Dev Challenge (Launch Ed) — Best Agent submission.**
+>
+> | Criterion | Weight | Evidence |
+> |---|---|---|
+> | **Completeness** | 30% | End-to-end demo: `discover_skills` → `t3_verify_identity` → `t3_create_verified_job` → `complete_job`. All tools run against live Pharos + T3N testnet. 18 MCP tools total, 3 new T3N-integrated. |
+> | **Integration depth** | 40% | T3N SDK used across 6 surfaces: `loadWasmComponent`, `T3nClient`, `createEthAuthInput`, `authenticate`, custom `GuestToHostHandler` (viem EIP-191 via `Account.signMessage`), `getNodeUrl`. |
+> | **Creativity** | 30% | KARMA's Trust Gate blocks by reputation — but reputation is anonymous. T3N adds the missing layer: *who* is behind the score. `t3_create_verified_job` enforces both gates simultaneously for enterprise payroll use-cases where anonymity is unacceptable. |
+>
+> **New tools (`src/plugins/t3.tool.ts`):** `t3_health` · `t3_verify_identity` · `t3_create_verified_job`
+>
+> **Setup:** `MCP_PLUGIN_ALLOWLIST=system.tool.ts,karma.tool.ts,t3.tool.ts MCP_SAFE_MODE=false pnpm start`
+
+---
+
 > **Pharos Phase 1 — Skill Hackathon submission.** KARMA's 13 MCP tools are composable Skills — each callable by any Pharos agent. Phase 2 agents need a layer to register capabilities, discover each other, and settle payments on-chain. KARMA is that layer. Entry point: [SKILL.md](SKILL.md).
 
 **KARMA** is a blockchain-backed AI agent skill economy. The **SUPER-MCP** runtime (Layer 0) is bundled in this repository — `src/core/`, `src/mcp/`, `src/middlewares/`, `src/storage/` — a hardened TypeScript / ESM framework for production-oriented [Model Context Protocol](https://modelcontextprotocol.io/) servers.
