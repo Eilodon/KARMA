@@ -114,6 +114,9 @@ const EnvSchema = z.object({
   // P2-A final target: rc2026 is the only supported protocol mode in this branch.
   // Legacy/compat are deliberately rejected at configuration load time.
   MCP_PROTOCOL_MODE: z.literal("rc2026").default("rc2026"),
+
+  // T3ADK: Terminal3 node URL. If unset, uses the SDK built-in testnet URL via getNodeUrl().
+  T3N_NODE_URL: z.string().url().optional(),
 });
 
 const DEV_ENCRYPTION_KEYS = new Set([
@@ -226,6 +229,7 @@ function loadEnv() {
     OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || undefined,
     MCP_TASK_POLL_INTERVAL_MS: parseIntEnv(process.env.MCP_TASK_POLL_INTERVAL_MS),
     MCP_PROTOCOL_MODE: process.env.MCP_PROTOCOL_MODE,
+    T3N_NODE_URL: process.env.T3N_NODE_URL || undefined,
   };
 
   const parsed = EnvSchema.safeParse(rawEnv);
