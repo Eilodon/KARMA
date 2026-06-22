@@ -1,7 +1,10 @@
 node_modules/
 dist/
 .env
+.env.local
 keystore.json
+keystore.json*
+keystore.*.bak
 # Foundry artifacts (root-anchored so they never match nested dirs like src/lib)
 /out/
 /cache/
