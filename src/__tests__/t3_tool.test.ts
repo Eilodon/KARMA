@@ -34,7 +34,8 @@ vi.mock("@terminal3/t3n-sdk", () => ({
     this.executeAndDecode = mockExecuteAndDecode;
   }),
   createEthAuthInput: vi.fn((addr: string) => ({ method: 0, address: addr })),
-  getNodeUrl: vi.fn(() => "https://testnet.terminal3.io"),
+  getNodeUrl: vi.fn(() => "https://cn-api.sg.testnet.t3n.terminal3.io"),
+  setEnvironment: vi.fn(),
   getScriptVersion: vi.fn(async () => "2.0.0"),
   eip191Digest: vi.fn(() => new Uint8Array(32).fill(0xab)),
   compactDidFromBytes: vi.fn(() => "did:t3n:857c2f11e9edddC7ddc03d035b0998de"),
@@ -87,7 +88,7 @@ vi.mock("../lib/karma_service.js", () => ({
 }));
 
 // Dynamic import AFTER mocks are registered.
-const { createT3Tools, getVerifiedDid, clearVerifiedDidsForTest } =
+const { createT3Tools, getVerifiedDid, clearVerifiedDidsForTest, buildSiweMessage } =
   await import("../plugins/t3.tool.js");
 
 describe("t3.tool.ts — t3_health", () => {
@@ -102,6 +103,34 @@ describe("t3.tool.ts — t3_health", () => {
     const health = tools.find(t => t.name === "t3_health")!;
     const res = await health.handler({}, {} as never, undefined, undefined);
     expect(res.structuredContent).toMatchObject({ wasmLoaded: true });
+  });
+});
+
+// Regression guard for the live EthSign wire format (PATTERN-DEBT-T3N-002). The SDK mocks
+// never exercise the real handler, so the SIWE message shape — the thing the live WASM
+// actually validates — is asserted directly here. A wrong Nonce/whitespace/field silently
+// passed every other test but failed live with "expected 65, got 99" / "missing field message".
+describe("t3.tool.ts — buildSiweMessage (EthSign SIWE envelope)", () => {
+  it("embeds the challenge as a hex Nonce and matches the T3N SIWE line shape", () => {
+    const challengeBytes = new Uint8Array(Array.from({ length: 32 }, (_, i) => i + 1));
+    const challengeB64 = Buffer.from(challengeBytes).toString("base64");
+    const msg = buildSiweMessage("0x857c2F11E9EDDdC7DDc03d035B0998De3c7677ec", challengeB64);
+    const lines = msg.split("\n");
+
+    expect(lines[0]).toBe("localhost wants you to sign in with your Ethereum account:");
+    expect(lines[1]).toBe("0x857c2f11e9edddc7ddc03d035b0998de3c7677ec"); // lowercased
+    expect(lines[2]).toBe("");
+    expect(lines[3]).toBe("");
+    expect(lines[4]).toBe("URI: https://t3n.io");
+    expect(lines[5]).toBe("Version: 1");
+    expect(lines[6]).toBe("Chain ID: 1");
+    expect(lines[7]).toBe(`Nonce: 0x${Buffer.from(challengeBytes).toString("hex")}`);
+    expect(lines[8]).toMatch(/^Issued At: \d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    expect(lines[9]).toMatch(/^Expiration Time: \d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    // Expiration must be strictly after Issued At.
+    const issuedAt = new Date(lines[8].slice("Issued At: ".length)).getTime();
+    const expiresAt = new Date(lines[9].slice("Expiration Time: ".length)).getTime();
+    expect(expiresAt).toBeGreaterThan(issuedAt);
   });
 });
 
@@ -360,6 +389,30 @@ describe("t3.tool.ts — t3_authorize_payroll_agent", () => {
     expect(sc.invocation_succeeded).toBe(false);
     expect(sc.invocation_error as string).toContain("org grant required");
     expect(typeof sc.invocation_note).toBe("string");
+    // authz-shaped error → boundary note is accurate here.
+    expect(sc.invocation_note as string).toMatch(/org-grant authorisation layer/i);
+  });
+
+  it("does NOT overstate a 404 (contract absent) as an org-grant authz rejection", async () => {
+    // Honesty guard (live finding): on public testnet the invocation fails with
+    // "tee:payroll: 404" / OrganisationNotFound — an environment limit, not an authz boundary.
+    mockExecuteAndDecode.mockRejectedValueOnce(
+      new Error("Failed to fetch current version for tee:payroll: 404 Not Found"),
+    );
+
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+
+    expect(sc.credential_issued).toBe(true);
+    expect(sc.invocation_succeeded).toBe(false);
+    expect(sc.invocation_error as string).toContain("404");
+    expect(sc.invocation_note as string).toMatch(/not provisioned on this network/i);
+    expect(sc.invocation_note as string).not.toMatch(/rejected at the org-grant authorisation layer/i);
   });
 
   it("reports a successful direct invocation when the org grant allows it", async () => {

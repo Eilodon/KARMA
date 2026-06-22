@@ -5,6 +5,7 @@ import {
   T3nClient,
   createEthAuthInput,
   getNodeUrl,
+  setEnvironment,
   getScriptVersion,
   eip191Digest,
   compactDidFromBytes,
@@ -25,6 +26,12 @@ import { keystoreManager } from "../lib/keystore.js";
 import { realKarmaService } from "../lib/karma_service.js";
 import { ENV } from "../config/env.js";
 import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
+
+// The T3N SDK defaults to the `production` environment, whose node (cn-api.sg.prod…)
+// is unreachable for development (TLS connection reset). KARMA targets the public
+// testnet (cn-api.sg.testnet…), where claimed accounts and test tokens live. An explicit
+// T3N_NODE_URL still overrides this in buildT3nClient. See PATTERN-DEBT-T3N-004.
+setEnvironment("testnet");
 
 // Module-level DID cache: agentId → verified did:t3n:... DID.
 // Populated by t3_verify_identity, read by t3_create_verified_job.
@@ -69,15 +76,43 @@ function compressPublicKey(uncompressedHex: string): Uint8Array {
   return new Uint8Array(Buffer.from(prefix + xHex, "hex"));
 }
 
-// Signs T3N EthSign challenges via viem Account.signMessage — raw key never leaves KeystoreManager.
+// T3N's EthSign challenge is SIWE (EIP-4361), mirroring the SDK's own metamask_sign: the
+// base64 challenge is embedded as the hex `Nonce` inside a full SIWE message string. The WASM
+// recovers the signer from (message, signature), so the message must be reproduced faithfully.
+// Verified live against cn-api.sg.testnet.t3n.terminal3.io (auth → did:t3n:...).
+export function buildSiweMessage(address: string, challengeB64: string): string {
+  const nonceHex = `0x${Buffer.from(challengeB64, "base64").toString("hex")}`;
+  const now = new Date();
+  const exp = new Date(now.getTime() + 5 * 60 * 1000);
+  return [
+    "localhost wants you to sign in with your Ethereum account:",
+    address.toLowerCase(),
+    "",
+    "",
+    "URI: https://t3n.io",
+    "Version: 1",
+    "Chain ID: 1",
+    `Nonce: ${nonceHex}`,
+    `Issued At: ${now.toISOString()}`,
+    `Expiration Time: ${exp.toISOString()}`,
+  ].join("\n");
+}
+
+// Signs T3N SIWE challenges via viem Account.signMessage — raw key never leaves KeystoreManager.
+// The response envelope is { host_to_guest, message, signature } where signature is BASE64 of
+// the raw 65-byte secp256k1 signature. Signing the raw challenge bytes, omitting `message`, or
+// hex-encoding the signature each pass the unit mocks but fail the live WASM with
+// "expected 65, got 99" / "missing field message" (PATTERN-DEBT-T3N-002).
 function buildEthSignHandler(agentId: string): GuestToHostHandler {
   const account = keystoreManager.getAccount(agentId);
+  const address = keystoreManager.getAddress(agentId);
   return async (requestData) => {
     const { challenge } = requestData as { challenge: string };
-    const raw = Uint8Array.from(Buffer.from(challenge, "base64"));
-    const signature = await account.signMessage({ message: { raw } });
+    const message = buildSiweMessage(address, challenge);
+    const sigHex = await account.signMessage({ message });
+    const signature = Buffer.from(sigHex.slice(2), "hex").toString("base64");
     return new TextEncoder().encode(
-      JSON.stringify({ host_to_guest: "EthSign", challenge, signature }),
+      JSON.stringify({ host_to_guest: "EthSign", message, signature }),
     );
   };
 }
@@ -642,9 +677,10 @@ export function createT3Tools(): ToolDefinition[] {
           result.grant_provisioning_error = e instanceof Error ? e.message : String(e);
         }
 
-        // Best-effort direct invocation — failure here is evidence of the org-grant
-        // boundary, not a tool error. The credential above is already validly issued
-        // and signed regardless of whether the contract call below succeeds.
+        // Best-effort direct invocation — failure here does NOT invalidate the credential
+        // above (already validly issued + TEE-signed). On public testnet the cause is
+        // environmental (org/contract not provisioned), not an authz rejection; the note
+        // below is derived from the actual error so the report never overstates the cause.
         try {
           const today = new Date();
           const periodEnd = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -670,12 +706,18 @@ export function createT3Tools(): ToolDefinition[] {
         } catch (e) {
           result.invocation_attempted = true;
           result.invocation_succeeded = false;
-          result.invocation_error = e instanceof Error ? e.message : String(e);
-          result.invocation_note =
-            "Delegation credential is validly issued and TEE-signed. Direct invocation was rejected at " +
-            "the org-grant authorisation layer (independent of the credential layer) — this is KARMA's " +
-            "defense-in-depth boundary working as designed: a valid signed credential alone does not grant " +
-            "execution rights without an org admin's grant.";
+          const invErr = e instanceof Error ? e.message : String(e);
+          result.invocation_error = invErr;
+          // Derive the note from the ACTUAL failure so the report never overstates the cause.
+          const authzBoundary = /grant|authoriz|forbidden|permission|denied/i.test(invErr);
+          result.invocation_note = authzBoundary
+            ? "Delegation credential is validly issued and TEE-signed. Direct invocation was rejected at " +
+              "the org-grant authorisation layer (independent of the credential layer) — KARMA's defense-in-" +
+              "depth boundary: a valid signed credential alone does not grant execution rights without an org grant."
+            : "Delegation credential is validly issued and TEE-signed. Direct invocation could not run because " +
+              "the 'tee:payroll' contract/org is not provisioned on this network (e.g. 404 / OrganisationNotFound " +
+              "on public testnet). The TEE-signed credential remains the verifiable, independently-checkable " +
+              "artifact; live execution additionally requires a deployed payroll contract and an org grant.";
         }
 
         return {
