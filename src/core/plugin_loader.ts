@@ -25,7 +25,8 @@ function parseList(raw: string): string[] {
 // (per-call fork + workerEnv() env allowlist). See docs/superpowers/specs/karma-app-layer.md D-1.
 export function isTrustedBuiltInPlugin(fileName: string): boolean {
   return fileName === "system.tool.ts" || fileName === "system.tool.js"
-      || fileName === "karma.tool.ts" || fileName === "karma.tool.js";
+      || fileName === "karma.tool.ts" || fileName === "karma.tool.js"
+      || fileName === "t3.tool.ts" || fileName === "t3.tool.js";
 }
 
 
