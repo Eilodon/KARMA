@@ -4,9 +4,10 @@ import { markTrustedRuntime, resetTrustedRuntimeForTest } from "../core/runtime_
 // Mock T3N SDK before importing the plugin so module-level init is skipped.
 vi.mock("@terminal3/t3n-sdk", () => ({
   loadWasmComponent: vi.fn(async () => ({ type: "mock-wasm" })),
-  T3nClient: vi.fn().mockImplementation(() => ({
-    authenticate: vi.fn(async () => "did:t3n:deadbeef01234567"),
-  })),
+  // Regular function (not arrow) so it can be used as a constructor with `new`.
+  T3nClient: vi.fn(function MockT3nClient(this: Record<string, unknown>) {
+    this.authenticate = vi.fn(async () => "did:t3n:deadbeef01234567");
+  }),
   createEthAuthInput: vi.fn((addr: string) => ({ method: 0, address: addr })),
   getNodeUrl: vi.fn(() => "https://testnet.terminal3.io"),
 }));
