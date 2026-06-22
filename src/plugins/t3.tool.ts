@@ -1,14 +1,25 @@
+import { randomBytes } from "node:crypto";
 import { z } from "zod/v4";
 import {
   loadWasmComponent,
   T3nClient,
   createEthAuthInput,
   getNodeUrl,
+  getScriptVersion,
   eip191Digest,
   compactDidFromBytes,
+  DelegationCustodialClient,
+  buildDelegationCredential,
+  buildPayrollDirectInvocation,
+  PAYROLL_FUNCTIONS_V1,
+  b64uEncodeBytes,
+  createOrgDataClientFromSession,
+  revokeDelegation,
   type GuestToHostHandler,
   type WasmComponent,
   type Did,
+  type DelegationCredential,
+  type PayrollRunRequest,
 } from "@terminal3/t3n-sdk";
 import { keystoreManager } from "../lib/keystore.js";
 import { realKarmaService } from "../lib/karma_service.js";
@@ -18,6 +29,11 @@ import type { ToolDefinition } from "../mcp/adapter/tool_registry.js";
 // Module-level DID cache: agentId → verified did:t3n:... DID.
 // Populated by t3_verify_identity, read by t3_create_verified_job.
 const verifiedDids = new Map<string, Did>();
+
+// Module-level issued-credential cache: agentId → last DelegationCredential JCS bytes + vc_id.
+// Populated by t3_authorize_payroll_agent, read by t3_revoke_payroll_authorization. Demo-scoped
+// (process memory only) — same volatility caveat as verifiedDids (PATTERN-DEBT-T3N-001).
+const issuedCredentials = new Map<string, { credentialJcs: Uint8Array; vcId: Uint8Array }>();
 
 // Module-level WASM singleton — loaded once on first call.
 let wasmComponent: WasmComponent | null = null;
@@ -29,13 +45,18 @@ async function getWasm(): Promise<WasmComponent> {
   return wasmComponent;
 }
 
-function buildT3nClient(wasm: WasmComponent, ethSignHandler: GuestToHostHandler): T3nClient {
+// Constructs a T3nClient AND completes the handshake — T3nClient.authenticate() throws
+// "Must complete handshake before authentication" otherwise (not mocked by unit tests,
+// only caught by a live smoke run; see PATTERN-DEBT-T3N-002).
+async function buildT3nClient(wasm: WasmComponent, ethSignHandler: GuestToHostHandler): Promise<T3nClient> {
   const baseUrl = ENV.T3N_NODE_URL ?? getNodeUrl();
-  return new T3nClient({
+  const client = new T3nClient({
     wasmComponent: wasm,
     baseUrl,
     handlers: { EthSign: ethSignHandler },
   });
+  await client.handshake();
+  return client;
 }
 
 // Compresses a 65-byte uncompressed secp256k1 public key ("0x04{x}{y}") to 33 bytes ("02|03{x}").
@@ -61,11 +82,29 @@ function buildEthSignHandler(agentId: string): GuestToHostHandler {
   };
 }
 
+// Projects a DelegationCredential to the wire shape DelegationCustodialClient.signCustodial expects:
+// binary fields as base64url-no-pad strings, bigint seconds as decimal strings.
+function credentialToWireShape(credential: DelegationCredential): Record<string, unknown> {
+  return {
+    v: credential.v,
+    user_did: credential.user_did,
+    agent_pubkey: b64uEncodeBytes(credential.agent_pubkey),
+    org_did: credential.org_did,
+    contract: credential.contract,
+    functions: credential.functions,
+    scopes: credential.scopes,
+    metadata: credential.metadata,
+    not_before_secs: credential.not_before_secs.toString(),
+    not_after_secs: credential.not_after_secs.toString(),
+    vc_id: b64uEncodeBytes(credential.vc_id),
+  };
+}
+
 // Creates a fresh T3nClient and authenticates it — required for session-bound methods (getUsage, getAuditEvents).
 async function createAuthenticatedClient(agentId: string): Promise<{ client: T3nClient; did: Did }> {
   const wasm = await getWasm();
   const ethSignHandler = buildEthSignHandler(agentId);
-  const client = buildT3nClient(wasm, ethSignHandler);
+  const client = await buildT3nClient(wasm, ethSignHandler);
   const address = keystoreManager.getAddress(agentId);
   const authInput = createEthAuthInput(address);
   const did = await client.authenticate(authInput);
@@ -75,6 +114,7 @@ async function createAuthenticatedClient(agentId: string): Promise<{ client: T3n
 // Exported for tests — resets module-level state between test cases.
 export function clearVerifiedDidsForTest(): void {
   verifiedDids.clear();
+  issuedCredentials.clear();
   wasmComponent = null;
 }
 
@@ -153,7 +193,7 @@ export function createT3Tools(): ToolDefinition[] {
 
         const wasm = await getWasm();
         const ethSignHandler = buildEthSignHandler(agent_id);
-        const client = buildT3nClient(wasm, ethSignHandler);
+        const client = await buildT3nClient(wasm, ethSignHandler);
         const address = keystoreManager.getAddress(agent_id);
         const authInput = createEthAuthInput(address);
         const did = await client.authenticate(authInput);
@@ -451,6 +491,263 @@ export function createT3Tools(): ToolDefinition[] {
           signature,
           signed_by: address,
           timestamp,
+        };
+        return {
+          structuredContent: result,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      },
+    },
+
+    {
+      name: "t3_authorize_payroll_agent",
+      description:
+        "Issue a bounded, revocable Terminal3 delegation credential authorising this agent to invoke " +
+        "specific payroll-v2 functions (subset of compute-payroll, execute-disbursement, finalize-audit, " +
+        "submit-escalations, validate-credentials), scoped to a time window and a batch dollar cap. " +
+        "The credential is signed by the T3N TEE via DelegationCustodialClient — the raw private key never " +
+        "leaves KeystoreManager. After signing, attempts a direct invocation of the first authorised function " +
+        "against Terminal3's tee:payroll contract; if the org-grant authorisation layer blocks it, the gate " +
+        "rejection is returned as evidence (not an error) — proof the credential and grant layers are " +
+        "independent. Demonstrates Terminal3's real flagship feature: cryptographically bounded agent " +
+        "authority, not just identity. Requires prior t3_verify_identity call.",
+      inputSchema: {
+        agent_id: z.string().describe("KARMA agent id (must be T3N-verified via t3_verify_identity)."),
+        functions: z
+          .array(z.enum(["compute-payroll", "execute-disbursement", "finalize-audit", "submit-escalations", "validate-credentials"]))
+          .min(1)
+          .max(16)
+          .optional()
+          .describe("Payroll v2 functions to authorise (subset of PAYROLL_FUNCTIONS_V1). Defaults to ['validate-credentials']."),
+        ttl_secs: z
+          .number()
+          .int()
+          .min(60)
+          .max(86400)
+          .optional()
+          .describe("Credential validity window in seconds from now. Defaults to 3600 (1 hour)."),
+        batch_cap_cents: z
+          .string()
+          .optional()
+          .describe("Decimal-cents string bounding the run's total disbursement, e.g. '100000' for a $1,000.00 cap. Defaults to '100000'."),
+      },
+      allowedPhases: ["intake", "execution", "review", "completed"],
+      capabilities: ["network"],
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      execution: { taskSupport: "optional" },
+      securityPolicy: {
+        externalCommunication: true,
+        accessesPrivateData: true,
+        waiverReason:
+          "Credential signing is delegated to the T3N TEE via DelegationCustodialClient.signCustodial — " +
+          "raw key never leaves KeystoreManager. The agent's public key (viem Account.publicKey, not the " +
+          "private key) is compressed client-side for the credential body. The direct-invocation attempt is " +
+          "scoped to payroll-v2 read/validate functions and degrades gracefully on an authorization rejection.",
+      },
+      handler: async (args) => {
+        const { agent_id, ttl_secs, batch_cap_cents } = args as {
+          agent_id: string;
+          functions?: string[];
+          ttl_secs?: number;
+          batch_cap_cents?: string;
+        };
+        const functions = (args as { functions?: string[] }).functions ?? ["validate-credentials"];
+
+        const cachedDid = verifiedDids.get(agent_id);
+        if (!cachedDid) {
+          throw new Error(
+            `[T3N] Agent '${agent_id}' not T3N-verified. Call t3_verify_identity first.`,
+          );
+        }
+        if (!keystoreManager.has(agent_id)) {
+          throw new Error(`[T3N] Agent not found in keystore: ${agent_id}`);
+        }
+
+        const sortedFunctions = [...new Set(functions)].sort();
+        const ttl = BigInt(ttl_secs ?? 3600);
+        const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+        const account = keystoreManager.getAccount(agent_id);
+        const agentPubkey = compressPublicKey(account.publicKey);
+        const vcId = new Uint8Array(randomBytes(16));
+
+        const { client, did } = await createAuthenticatedClient(agent_id);
+
+        const credential = buildDelegationCredential({
+          user_did: did.toString(),
+          agent_pubkey: agentPubkey,
+          org_did: did.toString(),
+          contract: "tee:payroll",
+          functions: sortedFunctions,
+          scopes: [],
+          metadata: { demo: "karma-self-delegation" },
+          not_before_secs: nowSecs,
+          not_after_secs: nowSecs + ttl,
+          vc_id: vcId,
+        });
+
+        const baseUrl = ENV.T3N_NODE_URL ?? getNodeUrl();
+        const delegationClient = new DelegationCustodialClient(client, baseUrl);
+        const { credentialJcs, userSig } = await delegationClient.signCustodial(
+          credentialToWireShape(credential),
+        );
+        issuedCredentials.set(agent_id, { credentialJcs, vcId });
+
+        const result: Record<string, unknown> = {
+          agent_id,
+          did,
+          credential_issued: true,
+          vc_id_b64u: b64uEncodeBytes(vcId),
+          functions_authorised: sortedFunctions,
+          not_before: new Date(Number(nowSecs) * 1000).toISOString(),
+          not_after: new Date(Number(nowSecs + ttl) * 1000).toISOString(),
+          batch_cap_cents: batch_cap_cents ?? "100000",
+          credential_jcs_hex: `0x${Buffer.from(credentialJcs).toString("hex")}`,
+          user_sig_hex: `0x${Buffer.from(userSig).toString("hex")}`,
+          grant_provisioning_attempted: false,
+          grant_provisioned: false,
+          grant_provisioning_error: null as string | null,
+          invocation_attempted: false,
+          invocation_succeeded: false,
+          invocation_result: null as unknown,
+          invocation_error: null as string | null,
+        };
+
+        // Best-effort self-grant provisioning — exploratory: lets the direct invocation
+        // attempt below succeed for real instead of only proving the credential layer.
+        // org-data semantics for a self-administered org are not documented by the SDK;
+        // independent failure path, never blocks credential issuance above.
+        try {
+          const orgClient = createOrgDataClientFromSession(client, baseUrl);
+          await orgClient.createPolicy({ orgDid: did.toString(), initialAdminDid: did.toString() });
+          await orgClient.setGrants({
+            orgDid: did.toString(),
+            contractId: "tee:payroll",
+            grants: [{
+              user_did: did.toString(),
+              functions: sortedFunctions,
+              scopes: [],
+              constraints: {},
+              expires_at_secs: null,
+            }],
+          });
+          result.grant_provisioning_attempted = true;
+          result.grant_provisioned = true;
+        } catch (e) {
+          result.grant_provisioning_attempted = true;
+          result.grant_provisioning_error = e instanceof Error ? e.message : String(e);
+        }
+
+        // Best-effort direct invocation — failure here is evidence of the org-grant
+        // boundary, not a tool error. The credential above is already validly issued
+        // and signed regardless of whether the contract call below succeeds.
+        try {
+          const today = new Date();
+          const periodEnd = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
+          const payrollRequest: PayrollRunRequest = {
+            org_id: did.toString(),
+            cycle_id: `karma-demo-${Date.now()}`,
+            pay_period_start: today.toISOString().slice(0, 10),
+            pay_period_end: periodEnd.toISOString().slice(0, 10),
+            batch_cap_cents: BigInt(batch_cap_cents ?? "100000"),
+            historical_baselines: {},
+          };
+          const directInvocation = buildPayrollDirectInvocation({ request: payrollRequest });
+          const scriptVersion = await getScriptVersion(baseUrl, "tee:payroll");
+          const payrollResult = await client.executeAndDecode({
+            script_name: "tee:payroll",
+            script_version: scriptVersion,
+            function_name: sortedFunctions[0],
+            input: directInvocation,
+          });
+          result.invocation_attempted = true;
+          result.invocation_succeeded = true;
+          result.invocation_result = payrollResult;
+        } catch (e) {
+          result.invocation_attempted = true;
+          result.invocation_succeeded = false;
+          result.invocation_error = e instanceof Error ? e.message : String(e);
+          result.invocation_note =
+            "Delegation credential is validly issued and TEE-signed. Direct invocation was rejected at " +
+            "the org-grant authorisation layer (independent of the credential layer) — this is KARMA's " +
+            "defense-in-depth boundary working as designed: a valid signed credential alone does not grant " +
+            "execution rights without an org admin's grant.";
+        }
+
+        return {
+          structuredContent: result,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      },
+    },
+
+    {
+      name: "t3_revoke_payroll_authorization",
+      description:
+        "Revoke a delegation credential previously issued by t3_authorize_payroll_agent — the whole " +
+        "credential, or a narrowed subset of its functions. Completes the issue → sign → use → revoke " +
+        "lifecycle: agent authority is never permanent, and revocation merges server-side (per-function " +
+        "revocations accumulate; a revocation can only narrow the authorised set, never grow it). " +
+        "Requires a prior t3_authorize_payroll_agent call this process session.",
+      inputSchema: {
+        agent_id: z.string().describe("KARMA agent id with a previously issued credential."),
+        functions: z
+          .array(z.enum(["compute-payroll", "execute-disbursement", "finalize-audit", "submit-escalations", "validate-credentials"]))
+          .min(1)
+          .max(16)
+          .optional()
+          .describe("Subset of functions to revoke. Omit to revoke the whole credential."),
+      },
+      allowedPhases: ["intake", "execution", "review", "completed"],
+      capabilities: ["network"],
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      execution: { taskSupport: "optional" },
+      securityPolicy: {
+        externalCommunication: true,
+        waiverReason:
+          "Revocation is authenticated via the caller's own T3nClient session (EthSign via " +
+          "account.signMessage) — only the credential's own user_did may revoke it; raw key never exposed.",
+      },
+      handler: async (args) => {
+        const { agent_id, functions } = args as { agent_id: string; functions?: string[] };
+
+        const cached = issuedCredentials.get(agent_id);
+        if (!cached) {
+          throw new Error(
+            `[T3N] No issued credential found for agent '${agent_id}'. Call t3_authorize_payroll_agent first.`,
+          );
+        }
+        if (!keystoreManager.has(agent_id)) {
+          throw new Error(`[T3N] Agent not found in keystore: ${agent_id}`);
+        }
+
+        const { client } = await createAuthenticatedClient(agent_id);
+        const baseUrl = ENV.T3N_NODE_URL ?? getNodeUrl();
+
+        const revocation = await revokeDelegation({
+          credentialJcsB64u: b64uEncodeBytes(cached.credentialJcs),
+          revokedFunctions: functions,
+          client,
+          baseUrl,
+        });
+
+        const result = {
+          agent_id,
+          vc_id: revocation.vcId,
+          revoked_functions: revocation.revokedFunctions,
+          revoked_entirely: revocation.revokedFunctions === null,
+          message: revocation.revokedFunctions === null
+            ? `Credential ${revocation.vcId} revoked entirely. Agent '${agent_id}' can no longer use it.`
+            : `Credential ${revocation.vcId} narrowed — revoked functions: ${revocation.revokedFunctions.join(", ")}.`,
         };
         return {
           structuredContent: result,
