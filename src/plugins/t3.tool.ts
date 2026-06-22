@@ -4,6 +4,8 @@ import {
   T3nClient,
   createEthAuthInput,
   getNodeUrl,
+  eip191Digest,
+  compactDidFromBytes,
   type GuestToHostHandler,
   type WasmComponent,
   type Did,
@@ -36,6 +38,16 @@ function buildT3nClient(wasm: WasmComponent, ethSignHandler: GuestToHostHandler)
   });
 }
 
+// Compresses a 65-byte uncompressed secp256k1 public key ("0x04{x}{y}") to 33 bytes ("02|03{x}").
+function compressPublicKey(uncompressedHex: string): Uint8Array {
+  const hex = uncompressedHex.startsWith("0x") ? uncompressedHex.slice(2) : uncompressedHex;
+  if (hex.length !== 130) throw new Error("[T3N] Expected 65-byte uncompressed public key (130 hex chars)");
+  const xHex = hex.slice(2, 66);
+  const yLastByte = parseInt(hex.slice(-2), 16);
+  const prefix = yLastByte % 2 === 0 ? "02" : "03";
+  return new Uint8Array(Buffer.from(prefix + xHex, "hex"));
+}
+
 // Signs T3N EthSign challenges via viem Account.signMessage — raw key never leaves KeystoreManager.
 function buildEthSignHandler(agentId: string): GuestToHostHandler {
   const account = keystoreManager.getAccount(agentId);
@@ -47,6 +59,17 @@ function buildEthSignHandler(agentId: string): GuestToHostHandler {
       JSON.stringify({ host_to_guest: "EthSign", challenge, signature }),
     );
   };
+}
+
+// Creates a fresh T3nClient and authenticates it — required for session-bound methods (getUsage, getAuditEvents).
+async function createAuthenticatedClient(agentId: string): Promise<{ client: T3nClient; did: Did }> {
+  const wasm = await getWasm();
+  const ethSignHandler = buildEthSignHandler(agentId);
+  const client = buildT3nClient(wasm, ethSignHandler);
+  const address = keystoreManager.getAddress(agentId);
+  const authInput = createEthAuthInput(address);
+  const did = await client.authenticate(authInput);
+  return { client, did };
 }
 
 // Exported for tests — resets module-level state between test cases.
@@ -247,6 +270,187 @@ export function createT3Tools(): ToolDefinition[] {
           reputation,
           threshold,
           message: `Dual-layer trust verified: T3N identity (${did}) + KARMA reputation (${reputation}/${threshold}).`,
+        };
+        return {
+          structuredContent: result,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      },
+    },
+    {
+      name: "t3_get_usage",
+      description:
+        "Query Terminal3 token usage and quota stats for a KARMA agent. " +
+        "Re-authenticates against T3N to obtain a live TEE session, then reads token consumption via " +
+        "T3nClient.getUsage(). Use to monitor agent token budget before high-frequency skill invocations. " +
+        "Requires prior t3_verify_identity call.",
+      inputSchema: {
+        agent_id: z.string().describe("KARMA agent id (must be T3N-verified via t3_verify_identity)."),
+      },
+      allowedPhases: ["intake", "execution", "review", "completed"],
+      capabilities: ["network"],
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      execution: { taskSupport: "optional" },
+      securityPolicy: {
+        externalCommunication: true,
+        waiverReason: "T3N read-only usage query — re-authenticates, no state mutation",
+      },
+      handler: async (args) => {
+        const { agent_id } = args as { agent_id: string };
+
+        const cachedDid = verifiedDids.get(agent_id);
+        if (!cachedDid) {
+          throw new Error(
+            `[T3N] Agent '${agent_id}' not T3N-verified. Call t3_verify_identity first.`,
+          );
+        }
+
+        if (!keystoreManager.has(agent_id)) {
+          throw new Error(`[T3N] Agent not found in keystore: ${agent_id}`);
+        }
+
+        const { client, did } = await createAuthenticatedClient(agent_id);
+        const usage = await client.getUsage();
+
+        const result = { agent_id, did, ...usage };
+        return {
+          structuredContent: result,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      },
+    },
+
+    {
+      name: "t3_get_audit_events",
+      description:
+        "Fetch the immutable TEE audit trail for a KARMA agent from the Terminal3 Network. " +
+        "Every action the agent performs through T3N is logged to the hardware-secured TEE ledger. " +
+        "Re-authenticates to get a live session, then reads events via T3nClient.getAuditEvents(). " +
+        "Requires prior t3_verify_identity call.",
+      inputSchema: {
+        agent_id: z.string().describe("KARMA agent id (must be T3N-verified via t3_verify_identity)."),
+      },
+      allowedPhases: ["intake", "execution", "review", "completed"],
+      capabilities: ["network"],
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      execution: { taskSupport: "optional" },
+      securityPolicy: {
+        externalCommunication: true,
+        waiverReason: "T3N read-only audit query — no mutation, TEE-attested log entries only",
+      },
+      handler: async (args) => {
+        const { agent_id } = args as { agent_id: string };
+
+        const cachedDid = verifiedDids.get(agent_id);
+        if (!cachedDid) {
+          throw new Error(
+            `[T3N] Agent '${agent_id}' not T3N-verified. Call t3_verify_identity first.`,
+          );
+        }
+
+        if (!keystoreManager.has(agent_id)) {
+          throw new Error(`[T3N] Agent not found in keystore: ${agent_id}`);
+        }
+
+        const { client, did } = await createAuthenticatedClient(agent_id);
+        const events = await client.getAuditEvents();
+
+        const result = { agent_id, did, event_count: Array.isArray(events) ? events.length : 0, events };
+        return {
+          structuredContent: result,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      },
+    },
+
+    {
+      name: "t3_sign_job_commitment",
+      description:
+        "Create a non-repudiation commitment receipt for a KARMA job anchored to the agent's verified T3N DID. " +
+        "Uses T3N SDK's eip191Digest() to hash the commitment payload and compactDidFromBytes() to derive the " +
+        "canonical DID from the agent's Ethereum address. The resulting EIP-191 signature binds the job " +
+        "irrevocably to the agent's on-chain identity — enterprise-grade accountability without exposing private keys. " +
+        "Requires prior t3_verify_identity call.",
+      inputSchema: {
+        agent_id: z
+          .string()
+          .describe("KARMA agent id (must be T3N-verified via t3_verify_identity)."),
+        job_id: z
+          .string()
+          .describe("KARMA job id to commit to (returned by create_job or t3_create_verified_job)."),
+        skill_id: z.string().describe("Skill id associated with the job."),
+      },
+      allowedPhases: ["intake", "execution", "review", "completed"],
+      capabilities: [],
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      execution: { taskSupport: "optional" },
+      securityPolicy: {
+        externalCommunication: false,
+        accessesPrivateData: true,
+        waiverReason:
+          "Signs commitment via viem Account.signMessage — raw key never leaves KeystoreManager; " +
+          "eip191Digest + compactDidFromBytes are pure T3N SDK cryptography with no network calls",
+      },
+      handler: async (args) => {
+        const { agent_id, job_id, skill_id } = args as {
+          agent_id: string;
+          job_id: string;
+          skill_id: string;
+        };
+
+        const did = verifiedDids.get(agent_id);
+        if (!did) {
+          throw new Error(
+            `[T3N] Agent '${agent_id}' not T3N-verified. Call t3_verify_identity first.`,
+          );
+        }
+
+        if (!keystoreManager.has(agent_id)) {
+          throw new Error(`[T3N] Agent not found in keystore: ${agent_id}`);
+        }
+
+        const timestamp = Date.now();
+        const payload = `KARMA job commitment: job_id=${job_id}, skill_id=${skill_id}, did=${did}, ts=${timestamp}`;
+        const msgBytes = new TextEncoder().encode(payload);
+
+        // T3N SDK: compute EIP-191 digest of the commitment payload.
+        const digest = eip191Digest(msgBytes);
+        const digestHex = `0x${Buffer.from(digest).toString("hex")}`;
+
+        // T3N SDK: derive the canonical compact DID from the agent's 20-byte Ethereum address.
+        const address = keystoreManager.getAddress(agent_id);
+        const addrBytes = new Uint8Array(Buffer.from(address.slice(2), "hex"));
+        const compactDid = compactDidFromBytes(addrBytes);
+
+        // Sign via viem Account.signMessage — raw key never exposed.
+        const account = keystoreManager.getAccount(agent_id);
+        const signature = await account.signMessage({ message: { raw: digest } });
+
+        const result = {
+          job_id,
+          skill_id,
+          did,
+          compact_did: compactDid,
+          commitment_payload: payload,
+          digest_hex: digestHex,
+          signature,
+          signed_by: address,
+          timestamp,
         };
         return {
           structuredContent: result,
