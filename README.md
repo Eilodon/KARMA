@@ -4,11 +4,11 @@
 >
 > | Criterion | Weight | Evidence |
 > |---|---|---|
-> | **Completeness** | 30% | End-to-end flow: `t3_verify_identity` → `discover_skills` → `t3_create_verified_job` → `deliver_result` → `complete_job` → `t3_sign_job_commitment`. 21 MCP tools total. All 441 tests pass. Live on Pharos Atlantic + T3N testnet. |
-> | **SDK integration depth** | 40% | T3N SDK used across **12 distinct surfaces**: `loadWasmComponent`, `T3nClient` constructor, `createEthAuthInput`, `getNodeUrl`, `authenticate()`, `getUsage()`, `getAuditEvents()`, `eip191Digest()`, `compactDidFromBytes()`, custom `GuestToHostHandler` (EIP-191 via viem), `Did` type, `WasmComponent` type. 6 dedicated T3N MCP tools. |
-> | **Creativity** | 30% | KARMA is the first on-chain agent-to-agent skill economy with T3N identity as its trust backbone. Agents can't be anonymous: T3N verifiable DID is required before any high-value escrow. `t3_sign_job_commitment` binds each job to an auditable, non-repudiable identity receipt using T3N's own `eip191Digest` + `compactDidFromBytes`. Dual-layer Trust Gate (T3N identity ∩ on-chain reputation) has no analogue in any prior submission. |
+> | **Completeness** | 30% | End-to-end flow: `t3_verify_identity` → `discover_skills` → `t3_create_verified_job` → `deliver_result` → `complete_job` → `t3_sign_job_commitment` → `t3_authorize_payroll_agent` → `t3_revoke_payroll_authorization`. 23 MCP tools total. All 455 tests pass. Live on Pharos Atlantic + T3N testnet — handshake/auth flow verified against the real T3N node, not just mocks. |
+> | **SDK integration depth** | 40% | T3N SDK used across **23 distinct surfaces**: `loadWasmComponent`, `T3nClient` constructor, `handshake()`, `authenticate()`, `createEthAuthInput`, `getNodeUrl`, `getScriptVersion`, `getUsage()`, `getAuditEvents()`, `executeAndDecode()`, `eip191Digest()`, `compactDidFromBytes()`, `DelegationCustodialClient` + `signCustodial()`, `buildDelegationCredential()`, `buildPayrollDirectInvocation()`, `PAYROLL_FUNCTIONS_V1`, `b64uEncodeBytes()`, `createOrgDataClientFromSession()` + `createPolicy()`/`setGrants()`, `revokeDelegation()`, custom `GuestToHostHandler` (EIP-191 via viem), `Did` type, `WasmComponent` type. 8 dedicated T3N MCP tools spanning the full lifecycle — identity, delegated authority, org-grant provisioning, business-contract invocation, and revocation. |
+> | **Creativity** | 30% | KARMA is the first on-chain agent-to-agent skill economy with T3N identity as its trust backbone. Agents can't be anonymous: T3N verifiable DID is required before any high-value escrow. `t3_sign_job_commitment` binds each job to an auditable, non-repudiable identity receipt. `t3_authorize_payroll_agent` goes further: it issues a TEE-signed, time-bounded, dollar-capped delegation credential scoped to specific payroll-v2 functions (`compute-payroll`, `execute-disbursement`, …), self-provisions an org grant via `SessionOrgDataClient`, then attempts a real direct invocation against `tee:payroll` — and `t3_revoke_payroll_authorization` closes the loop. Authority is never permanent: every grant this agent holds can be narrowed or pulled entirely, on-chain-verifiable, by the same agent that issued it. Four-layer trust (T3N identity ∩ delegation scope ∩ org grant ∩ on-chain reputation) — full issue → sign → provision → execute → revoke lifecycle — has no analogue in any prior submission. |
 >
-> **T3N tools (`src/plugins/t3.tool.ts`):** `t3_health` · `t3_verify_identity` · `t3_create_verified_job` · `t3_get_usage` · `t3_get_audit_events` · `t3_sign_job_commitment`
+> **T3N tools (`src/plugins/t3.tool.ts`):** `t3_health` · `t3_verify_identity` · `t3_create_verified_job` · `t3_get_usage` · `t3_get_audit_events` · `t3_sign_job_commitment` · `t3_authorize_payroll_agent` · `t3_revoke_payroll_authorization`
 >
 > **Setup:** `MCP_PLUGIN_ALLOWLIST=system.tool.ts,karma.tool.ts,t3.tool.ts MCP_SAFE_MODE=false pnpm start`
 
@@ -117,11 +117,15 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 
 ### Layer 3 — Terminal3 Agent Auth SDK (fully shipped, 2026-06-22)
 
-- Six in-process T3N tools: `t3_health`, `t3_verify_identity`, `t3_create_verified_job`, `t3_get_usage`, `t3_get_audit_events`, `t3_sign_job_commitment`.
-- 12 distinct SDK surfaces used: `loadWasmComponent`, `T3nClient`, `createEthAuthInput`, `getNodeUrl`, `T3nClient.authenticate`, `T3nClient.getUsage`, `T3nClient.getAuditEvents`, `eip191Digest`, `compactDidFromBytes`, custom `GuestToHostHandler` (EIP-191/viem), `Did` type, `WasmComponent` type.
-- WASM component is a process-level singleton (`loadWasmComponent()` called once); per-call `T3nClient` instances re-authenticate to obtain fresh TEE sessions — safe for stateless HTTP.
+- Eight in-process T3N tools: `t3_health`, `t3_verify_identity`, `t3_create_verified_job`, `t3_get_usage`, `t3_get_audit_events`, `t3_sign_job_commitment`, `t3_authorize_payroll_agent`, `t3_revoke_payroll_authorization`.
+- 23 distinct SDK surfaces used: `loadWasmComponent`, `T3nClient`, `T3nClient.handshake`, `T3nClient.authenticate`, `createEthAuthInput`, `getNodeUrl`, `getScriptVersion`, `T3nClient.getUsage`, `T3nClient.getAuditEvents`, `T3nClient.executeAndDecode`, `eip191Digest`, `compactDidFromBytes`, `DelegationCustodialClient` + `.signCustodial`, `buildDelegationCredential`, `buildPayrollDirectInvocation`, `PAYROLL_FUNCTIONS_V1`, `b64uEncodeBytes`, `createOrgDataClientFromSession` + `.createPolicy`/`.setGrants`, `revokeDelegation`, custom `GuestToHostHandler` (EIP-191/viem), `Did` type, `WasmComponent` type.
+- WASM component is a process-level singleton (`loadWasmComponent()` called once); per-call `T3nClient` instances complete `handshake()` then `authenticate()` to obtain fresh TEE sessions — safe for stateless HTTP. (`handshake()` before `authenticate()` is required by the SDK and is easy to miss: it is not exercised by SDK-mocked unit tests, only caught by a live run — see PATTERN-DEBT-T3N-002.)
 - `t3_sign_job_commitment` provides non-repudiation at the KARMA layer: EIP-191 digest of the job/DID/skill tuple + canonical `compactDidFromBytes` receipt. Enterprise-grade accountability proof without raw-key exposure.
+- `t3_authorize_payroll_agent` issues a TEE-signed, time-bounded, dollar-capped delegation credential (Terminal3's User-to-Agent Delegation system) scoped to specific payroll-v2 functions, self-provisions an org grant via `createOrgDataClientFromSession` (`createPolicy` + `setGrants`, session-authenticated — no raw key), then attempts a direct invocation against `tee:payroll`. Either provisioning step or the invocation can fail independently without breaking the other — every failure is reported as structured evidence, not thrown.
+- `t3_revoke_payroll_authorization` closes the lifecycle: calls `revokeDelegation()` to pull the whole credential or narrow it to a smaller function set, server-side-merged and only callable by the credential's own `user_did`.
 - Residual gap (PATTERN-DEBT-T3N-001): DID cache is process-scoped (volatile on restart); production needs a persistent session store.
+- Residual gap (PATTERN-DEBT-T3N-002): `handshake()` ordering bug — fixed this cycle (chokepoint: `buildT3nClient`); flagged here because it is the canonical example of why SDK-mocked unit tests cannot catch wire-protocol ordering requirements. Always confirm new T3nClient call sequences with a live smoke run (`src/scripts/t3_payroll_smoke.ts`), not just mocks.
+- Residual gap (PATTERN-DEBT-T3N-003): self-grant provisioning (`createPolicy`/`setGrants` against a self-administered org) is exploratory — the SDK ships no documented example of an agent provisioning its own `tee:payroll` grant, so live success is unconfirmed as of this cycle (this sandboxed dev environment cannot reach Terminal3's node at all — TLS resets on every attempt, unrelated to the code). If `grant_provisioned: true` and `invocation_succeeded: true` both appear on a live run, this gap is closed; until then, the rejection path remains the demo-safe fallback proof point.
 
 Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried live by `karma_pattern_debt`) and `docs/superpowers/pattern-debt.md` (KARMA app layer).
 
@@ -162,7 +166,7 @@ Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried 
 
 ### Layer 3 — Terminal3 Agent Auth SDK (`t3.tool.ts`)
 
-KARMA uses the T3N Agent Auth SDK as the identity and accountability backbone. Every high-value skill invocation must pass a verified DID gate before escrow is allowed. The SDK integration covers 12 distinct surfaces across three capability tiers.
+KARMA uses the T3N Agent Auth SDK as the identity and accountability backbone. Every high-value skill invocation must pass a verified DID gate before escrow is allowed. The SDK integration covers 23 distinct surfaces across four capability tiers.
 
 **Identity & authentication tier**
 - **`t3_health`** — Validates `T3N_NODE_URL` and loads the WASM component (`loadWasmComponent()`). First call to confirm the TEE runtime is reachable.
@@ -176,14 +180,18 @@ KARMA uses the T3N Agent Auth SDK as the identity and accountability backbone. E
 - **`t3_sign_job_commitment`** — Creates a non-repudiation receipt for a KARMA job using `eip191Digest()` (T3N SDK) to hash the commitment payload and `compactDidFromBytes()` (T3N SDK) to derive the canonical DID from the agent's Ethereum address. The receipt is signed via `account.signMessage` (EIP-191). Binding a job to a verified DID produces court-admissible accountability without raw-key exposure.
 - **`t3_create_verified_job`** — Dual-layer escrow gate: (1) T3N identity must be present in the session DID cache, (2) on-chain `agentReputation` must meet the skill's `minReputationToInvoke`. Both gates must pass simultaneously — neither alone is sufficient.
 
-**SDK surfaces covered:** `loadWasmComponent` · `T3nClient` constructor · `createEthAuthInput` · `getNodeUrl` · `authenticate()` · `getUsage()` · `getAuditEvents()` · `eip191Digest()` · `compactDidFromBytes()` · `GuestToHostHandler` (custom EIP-191 impl) · `Did` type · `WasmComponent` type
+**Delegated authority tier** *(Terminal3's User-to-Agent Delegation Credential system — full lifecycle)*
+- **`t3_authorize_payroll_agent`** — Builds a `DelegationCredential` (`buildDelegationCredential`) scoped to a caller-chosen subset of `PAYROLL_FUNCTIONS_V1` (`compute-payroll`, `execute-disbursement`, `finalize-audit`, `submit-escalations`, `validate-credentials`), a bounded validity window, and a batch dollar cap. The credential body is projected to its base64url wire shape (`b64uEncodeBytes`) and signed by the T3N TEE via `DelegationCustodialClient.signCustodial` — never the raw private key. It then self-provisions an org grant (`createOrgDataClientFromSession(client, baseUrl).createPolicy` + `.setGrants`, dispatched over the agent's own already-authenticated session — no separate raw-secret client) and attempts a direct invocation (`buildPayrollDirectInvocation` + `T3nClient.executeAndDecode` against `tee:payroll`, version-resolved via `getScriptVersion`). Grant provisioning and invocation each fail independently and gracefully — every outcome (`grant_provisioned`, `invocation_succeeded`, or their paired `*_error` fields) is structured, returned evidence, never an unhandled throw.
+- **`t3_revoke_payroll_authorization`** — Calls `revokeDelegation()` against the credential issued above, either pulling it entirely or narrowing it to a smaller function set (revocations only ever shrink the authorised set, merged server-side). Only the credential's own `user_did` can revoke it. Closes the loop: an agent's authority is demonstrably temporary and independently retractable, not a standing grant.
+
+**SDK surfaces covered:** `loadWasmComponent` · `T3nClient` constructor · `handshake()` · `authenticate()` · `createEthAuthInput` · `getNodeUrl` · `getScriptVersion()` · `getUsage()` · `getAuditEvents()` · `executeAndDecode()` · `eip191Digest()` · `compactDidFromBytes()` · `DelegationCustodialClient` + `signCustodial()` · `buildDelegationCredential()` · `buildPayrollDirectInvocation()` · `PAYROLL_FUNCTIONS_V1` · `b64uEncodeBytes()` · `createOrgDataClientFromSession()` + `createPolicy()`/`setGrants()` · `revokeDelegation()` · `GuestToHostHandler` (custom EIP-191 impl) · `Did` type · `WasmComponent` type
 
 **T3N flow in KARMA:**
 ```
 Agent
   │ t3_verify_identity
   ▼
-T3N TEE (WASM component)
+T3nClient.handshake() → T3nClient.authenticate()
   │ EIP-191 challenge/response (GuestToHostHandler via viem Account)
   ▼
 did:t3n:... cached in process
@@ -191,6 +199,19 @@ did:t3n:... cached in process
   ├─ t3_get_usage → T3nClient.getUsage() → token balance
   ├─ t3_get_audit_events → T3nClient.getAuditEvents() → TEE audit log
   ├─ t3_sign_job_commitment → eip191Digest() + compactDidFromBytes() → non-repudiation receipt
+  │
+  ├─ t3_authorize_payroll_agent
+  │    │ buildDelegationCredential → DelegationCustodialClient.signCustodial (TEE-signed)
+  │    ▼
+  │  signed, bounded, revocable credential (functions × validity window × dollar cap)
+  │    │ createOrgDataClientFromSession → createPolicy + setGrants (self-provision attempt)
+  │    ▼
+  │  org grant provisioned? → buildPayrollDirectInvocation → T3nClient.executeAndDecode("tee:payroll", ...)
+  │    ▼
+  │  success | explained rejection (provisioning and invocation each fail independently)
+  │    │
+  │    ▼
+  │  t3_revoke_payroll_authorization → revokeDelegation() → whole credential or narrowed function set
   │
   └─ t3_create_verified_job
        │ Gate 1: DID must be in session cache (T3N identity)
