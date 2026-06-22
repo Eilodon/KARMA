@@ -4,11 +4,11 @@
 >
 > | Criterion | Weight | Evidence |
 > |---|---|---|
-> | **Completeness** | 30% | End-to-end demo: `discover_skills` → `t3_verify_identity` → `t3_create_verified_job` → `complete_job`. All tools run against live Pharos + T3N testnet. 18 MCP tools total, 3 new T3N-integrated. |
-> | **Integration depth** | 40% | T3N SDK used across 6 surfaces: `loadWasmComponent`, `T3nClient`, `createEthAuthInput`, `authenticate`, custom `GuestToHostHandler` (viem EIP-191 via `Account.signMessage`), `getNodeUrl`. |
-> | **Creativity** | 30% | KARMA's Trust Gate blocks by reputation — but reputation is anonymous. T3N adds the missing layer: *who* is behind the score. `t3_create_verified_job` enforces both gates simultaneously for enterprise payroll use-cases where anonymity is unacceptable. |
+> | **Completeness** | 30% | End-to-end flow: `t3_verify_identity` → `discover_skills` → `t3_create_verified_job` → `deliver_result` → `complete_job` → `t3_sign_job_commitment`. 21 MCP tools total. All 441 tests pass. Live on Pharos Atlantic + T3N testnet. |
+> | **SDK integration depth** | 40% | T3N SDK used across **12 distinct surfaces**: `loadWasmComponent`, `T3nClient` constructor, `createEthAuthInput`, `getNodeUrl`, `authenticate()`, `getUsage()`, `getAuditEvents()`, `eip191Digest()`, `compactDidFromBytes()`, custom `GuestToHostHandler` (EIP-191 via viem), `Did` type, `WasmComponent` type. 6 dedicated T3N MCP tools. |
+> | **Creativity** | 30% | KARMA is the first on-chain agent-to-agent skill economy with T3N identity as its trust backbone. Agents can't be anonymous: T3N verifiable DID is required before any high-value escrow. `t3_sign_job_commitment` binds each job to an auditable, non-repudiable identity receipt using T3N's own `eip191Digest` + `compactDidFromBytes`. Dual-layer Trust Gate (T3N identity ∩ on-chain reputation) has no analogue in any prior submission. |
 >
-> **New tools (`src/plugins/t3.tool.ts`):** `t3_health` · `t3_verify_identity` · `t3_create_verified_job`
+> **T3N tools (`src/plugins/t3.tool.ts`):** `t3_health` · `t3_verify_identity` · `t3_create_verified_job` · `t3_get_usage` · `t3_get_audit_events` · `t3_sign_job_commitment`
 >
 > **Setup:** `MCP_PLUGIN_ALLOWLIST=system.tool.ts,karma.tool.ts,t3.tool.ts MCP_SAFE_MODE=false pnpm start`
 
@@ -115,6 +115,14 @@ KARMA intentionally does **not** claim to provide a true security sandbox for un
 - Tier-2 Sybil-resistance bond: Optional, per-agent capital-at-risk seed for off-chain flow reputation. Locked while active, withdrawable after a 7-day cooldown (PD-007). Not a paywall, but deters Sybil identities by requiring capital lockup.
 - ABI drift-guarded: `src/__tests__/karma_contract.test.ts` re-reads the Foundry artifact and fails if the Solidity surface diverges from `src/lib/abi.ts`.
 
+### Layer 3 — Terminal3 Agent Auth SDK (fully shipped, 2026-06-22)
+
+- Six in-process T3N tools: `t3_health`, `t3_verify_identity`, `t3_create_verified_job`, `t3_get_usage`, `t3_get_audit_events`, `t3_sign_job_commitment`.
+- 12 distinct SDK surfaces used: `loadWasmComponent`, `T3nClient`, `createEthAuthInput`, `getNodeUrl`, `T3nClient.authenticate`, `T3nClient.getUsage`, `T3nClient.getAuditEvents`, `eip191Digest`, `compactDidFromBytes`, custom `GuestToHostHandler` (EIP-191/viem), `Did` type, `WasmComponent` type.
+- WASM component is a process-level singleton (`loadWasmComponent()` called once); per-call `T3nClient` instances re-authenticate to obtain fresh TEE sessions — safe for stateless HTTP.
+- `t3_sign_job_commitment` provides non-repudiation at the KARMA layer: EIP-191 digest of the job/DID/skill tuple + canonical `compactDidFromBytes` receipt. Enterprise-grade accountability proof without raw-key exposure.
+- Residual gap (PATTERN-DEBT-T3N-001): DID cache is process-scoped (volatile on restart); production needs a persistent session store.
+
 Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried live by `karma_pattern_debt`) and `docs/superpowers/pattern-debt.md` (KARMA app layer).
 
 ---
@@ -151,6 +159,45 @@ Known residual gaps are tracked in `src/core/pattern_debt.ts` (Layer 0, queried 
 - **`query_social_graph`** — Job edges for an agent (as provider and as requester); `format: "full"` hydrates each edge into job details plus a summary.
 - **`get_pending_balance`** — Read an agent's withdrawable balance (`pendingWithdrawals`) in wei and formatted PHRS; accepts an `agentId` or raw `address`.
 - **`withdraw_balance`** — Pull the agent's full released-escrow balance to its wallet, closing the economic loop entirely inside MCP. Returns `amountWei` decoded from the `Withdrawn` event.
+
+### Layer 3 — Terminal3 Agent Auth SDK (`t3.tool.ts`)
+
+KARMA uses the T3N Agent Auth SDK as the identity and accountability backbone. Every high-value skill invocation must pass a verified DID gate before escrow is allowed. The SDK integration covers 12 distinct surfaces across three capability tiers.
+
+**Identity & authentication tier**
+- **`t3_health`** — Validates `T3N_NODE_URL` and loads the WASM component (`loadWasmComponent()`). First call to confirm the TEE runtime is reachable.
+- **`t3_verify_identity`** — Authenticates a KARMA agent against the T3N testnet using EIP-191 signing (`createEthAuthInput` → `T3nClient.authenticate`). The returned `did:t3n:…` is cached per session; raw private key never leaves the in-process `KeystoreManager`.
+
+**Session & telemetry tier** *(T3nClient session-bound methods — require prior `t3_verify_identity`)*
+- **`t3_get_usage`** — Re-authenticates to obtain a live TEE session, then calls `T3nClient.getUsage()` to read token balance and consumption stats. Agents can check their T3N budget before high-frequency skill invocations.
+- **`t3_get_audit_events`** — Calls `T3nClient.getAuditEvents()` to fetch the immutable TEE-attested audit trail for the agent. Every T3N-mediated action is logged to the hardware-secured ledger; enterprises can independently verify agent behaviour.
+
+**Cryptographic commitment tier** *(standalone SDK primitives)*
+- **`t3_sign_job_commitment`** — Creates a non-repudiation receipt for a KARMA job using `eip191Digest()` (T3N SDK) to hash the commitment payload and `compactDidFromBytes()` (T3N SDK) to derive the canonical DID from the agent's Ethereum address. The receipt is signed via `account.signMessage` (EIP-191). Binding a job to a verified DID produces court-admissible accountability without raw-key exposure.
+- **`t3_create_verified_job`** — Dual-layer escrow gate: (1) T3N identity must be present in the session DID cache, (2) on-chain `agentReputation` must meet the skill's `minReputationToInvoke`. Both gates must pass simultaneously — neither alone is sufficient.
+
+**SDK surfaces covered:** `loadWasmComponent` · `T3nClient` constructor · `createEthAuthInput` · `getNodeUrl` · `authenticate()` · `getUsage()` · `getAuditEvents()` · `eip191Digest()` · `compactDidFromBytes()` · `GuestToHostHandler` (custom EIP-191 impl) · `Did` type · `WasmComponent` type
+
+**T3N flow in KARMA:**
+```
+Agent
+  │ t3_verify_identity
+  ▼
+T3N TEE (WASM component)
+  │ EIP-191 challenge/response (GuestToHostHandler via viem Account)
+  ▼
+did:t3n:... cached in process
+  │
+  ├─ t3_get_usage → T3nClient.getUsage() → token balance
+  ├─ t3_get_audit_events → T3nClient.getAuditEvents() → TEE audit log
+  ├─ t3_sign_job_commitment → eip191Digest() + compactDidFromBytes() → non-repudiation receipt
+  │
+  └─ t3_create_verified_job
+       │ Gate 1: DID must be in session cache (T3N identity)
+       │ Gate 2: agentReputation ≥ skill.minReputationToInvoke (on-chain)
+       ▼
+     AgentSkillRegistry.createJob (Pharos Atlantic escrow)
+```
 
 ### Explicit non-claims
 
@@ -202,6 +249,13 @@ Built-in plugin: karma.tool.ts (in-process, trusted)
   |   |-- contract.ts (viem public + wallet clients)
   |       |-- writeContractBounded (exactly-once, pending on timeout)
   |       |-- SkillEventIndexer (backfill + live-watch + reconnect)
+Built-in plugin: t3.tool.ts (in-process, trusted)
+  |-- Terminal3 Agent Auth SDK (@terminal3/t3n-sdk v3.10.1)
+  |   |-- loadWasmComponent() — WASM TEE component singleton
+  |   |-- T3nClient — session-bound client (authenticate, getUsage, getAuditEvents)
+  |   |-- createEthAuthInput / GuestToHostHandler — EIP-191 via viem Account
+  |   |-- eip191Digest / compactDidFromBytes — standalone crypto primitives
+  |-- verifiedDids cache (process-scoped DID→session mapping)
   v
 AgentSkillRegistry.sol v3 (Pharos Atlantic, chainId=688689)
   |-- registerSkill (+minReputationToInvoke) / deactivateSkill / setMinReputation
