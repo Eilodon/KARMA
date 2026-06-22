@@ -1,11 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { markTrustedRuntime, resetTrustedRuntimeForTest } from "../core/runtime_identity.js";
 
+// Shared mock fn referenced both inside the vi.mock factory (constructor wiring) and
+// from individual test bodies (to control success/failure per test) — vi.hoisted is
+// required because vi.mock factories are hoisted above normal module-scope const decls.
+const { mockExecuteAndDecode, mockCreatePolicy, mockSetGrants, mockRevokeDelegation } = vi.hoisted(() => ({
+  mockExecuteAndDecode: vi.fn(async () => ({ status: "validated", ok: true })),
+  mockCreatePolicy: vi.fn(async () => ({ status: "created", tx_hash: "0xpolicytx" })),
+  mockSetGrants: vi.fn(async () => ({ status: "created", tx_hash: "0xgranttx" })),
+  mockRevokeDelegation: vi.fn(async (opts: { revokedFunctions?: string[] }) => ({
+    vcId: "mock-vc-id",
+    revokedFunctions: opts.revokedFunctions ?? null,
+  })),
+}));
+
 // Mock T3N SDK before importing the plugin so module-level init is skipped.
 vi.mock("@terminal3/t3n-sdk", () => ({
   loadWasmComponent: vi.fn(async () => ({ type: "mock-wasm" })),
   // Regular function (not arrow) so it can be used as a constructor with `new`.
   T3nClient: vi.fn(function MockT3nClient(this: Record<string, unknown>) {
+    this.handshake = vi.fn(async () => ({ sessionId: { value: "mock-session" }, expiry: 0, authenticated: false }));
     this.authenticate = vi.fn(async () => "did:t3n:deadbeef01234567");
     this.getUsage = vi.fn(async () => ({
       tokens_remaining: 19500,
@@ -17,11 +31,29 @@ vi.mock("@terminal3/t3n-sdk", () => ({
     ]);
     this.getDid = vi.fn(() => "did:t3n:deadbeef01234567");
     this.isAuthenticated = vi.fn(() => true);
+    this.executeAndDecode = mockExecuteAndDecode;
   }),
   createEthAuthInput: vi.fn((addr: string) => ({ method: 0, address: addr })),
   getNodeUrl: vi.fn(() => "https://testnet.terminal3.io"),
+  getScriptVersion: vi.fn(async () => "2.0.0"),
   eip191Digest: vi.fn(() => new Uint8Array(32).fill(0xab)),
   compactDidFromBytes: vi.fn(() => "did:t3n:857c2f11e9edddC7ddc03d035b0998de"),
+  PAYROLL_FUNCTIONS_V1: ["compute-payroll", "execute-disbursement", "finalize-audit", "submit-escalations", "validate-credentials"],
+  b64uEncodeBytes: vi.fn((bytes: Uint8Array) => Buffer.from(bytes).toString("base64url")),
+  buildDelegationCredential: vi.fn((opts: Record<string, unknown>) => ({ v: "ot3.delegation/1", ...opts })),
+  buildPayrollDirectInvocation: vi.fn((opts: { request: unknown }) => ({ request: opts.request })),
+  // Regular function (not arrow) — same constructor-mock rule as T3nClient above.
+  DelegationCustodialClient: vi.fn(function MockDelegationCustodialClient(this: Record<string, unknown>) {
+    this.signCustodial = vi.fn(async () => ({
+      credentialJcs: new Uint8Array([1, 2, 3]),
+      userSig: new Uint8Array([4, 5, 6]),
+    }));
+  }),
+  createOrgDataClientFromSession: vi.fn(() => ({
+    createPolicy: mockCreatePolicy,
+    setGrants: mockSetGrants,
+  })),
+  revokeDelegation: mockRevokeDelegation,
 }));
 
 // Mock keystoreManager singleton.
@@ -252,5 +284,183 @@ describe("t3.tool.ts — t3_sign_job_commitment", () => {
     expect((sc.digest_hex as string).startsWith("0x")).toBe(true);
     expect(typeof sc.commitment_payload).toBe("string");
     expect((sc.commitment_payload as string)).toContain("job_id=42");
+  });
+});
+
+describe("t3.tool.ts — t3_authorize_payroll_agent", () => {
+  beforeEach(() => {
+    resetTrustedRuntimeForTest();
+    markTrustedRuntime();
+    clearVerifiedDidsForTest();
+    mockExecuteAndDecode.mockClear();
+    mockExecuteAndDecode.mockImplementation(async () => ({ status: "validated", ok: true }));
+    mockCreatePolicy.mockClear();
+    mockCreatePolicy.mockImplementation(async () => ({ status: "created", tx_hash: "0xpolicytx" }));
+    mockSetGrants.mockClear();
+    mockSetGrants.mockImplementation(async () => ({ status: "created", tx_hash: "0xgranttx" }));
+  });
+
+  it("rejects when agent not T3N-verified", async () => {
+    const tools = createT3Tools();
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    await expect(
+      authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined),
+    ).rejects.toThrow(/not t3n-verified|t3_verify_identity/i);
+  });
+
+  it("issues a signed, bounded delegation credential defaulting to validate-credentials", async () => {
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc).toMatchObject({
+      agent_id: "agent-alpha",
+      did: "did:t3n:deadbeef01234567",
+      credential_issued: true,
+      functions_authorised: ["validate-credentials"],
+      batch_cap_cents: "100000",
+    });
+    expect(typeof sc.vc_id_b64u).toBe("string");
+    expect((sc.credential_jcs_hex as string).startsWith("0x")).toBe(true);
+    expect((sc.user_sig_hex as string).startsWith("0x")).toBe(true);
+    expect(new Date(sc.not_after as string).getTime()).toBeGreaterThan(new Date(sc.not_before as string).getTime());
+  });
+
+  it("sorts and dedupes requested functions", async () => {
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler(
+      { agent_id: "agent-alpha", functions: ["execute-disbursement", "compute-payroll", "compute-payroll"] },
+      {} as never, undefined, undefined,
+    );
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.functions_authorised).toEqual(["compute-payroll", "execute-disbursement"]);
+  });
+
+  it("degrades gracefully when direct invocation is rejected at the org-grant boundary", async () => {
+    mockExecuteAndDecode.mockRejectedValueOnce(new Error("org grant required: OrgContractGrants[tee:payroll]"));
+
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+
+    // Credential issuance must still have succeeded — it is independent of the invocation attempt.
+    expect(sc.credential_issued).toBe(true);
+    expect(sc.invocation_attempted).toBe(true);
+    expect(sc.invocation_succeeded).toBe(false);
+    expect(sc.invocation_error as string).toContain("org grant required");
+    expect(typeof sc.invocation_note).toBe("string");
+  });
+
+  it("reports a successful direct invocation when the org grant allows it", async () => {
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.invocation_attempted).toBe(true);
+    expect(sc.invocation_succeeded).toBe(true);
+    expect(sc.invocation_result).toMatchObject({ status: "validated" });
+  });
+
+  it("self-provisions an org grant via SessionOrgDataClient before attempting invocation", async () => {
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.grant_provisioning_attempted).toBe(true);
+    expect(sc.grant_provisioned).toBe(true);
+    expect(mockCreatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ orgDid: "did:t3n:deadbeef01234567", initialAdminDid: "did:t3n:deadbeef01234567" }),
+    );
+    expect(mockSetGrants).toHaveBeenCalledWith(
+      expect.objectContaining({ orgDid: "did:t3n:deadbeef01234567", contractId: "tee:payroll" }),
+    );
+  });
+
+  it("degrades gracefully when self-grant provisioning fails, independent of credential issuance", async () => {
+    mockSetGrants.mockRejectedValueOnce(new Error("admin grant denied: not an org admin"));
+
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    const res = await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+
+    expect(sc.credential_issued).toBe(true);
+    expect(sc.grant_provisioning_attempted).toBe(true);
+    expect(sc.grant_provisioned).toBe(false);
+    expect(sc.grant_provisioning_error as string).toContain("admin grant denied");
+  });
+});
+
+describe("t3.tool.ts — t3_revoke_payroll_authorization", () => {
+  beforeEach(() => {
+    resetTrustedRuntimeForTest();
+    markTrustedRuntime();
+    clearVerifiedDidsForTest();
+    mockRevokeDelegation.mockClear();
+  });
+
+  it("rejects when no credential has been issued for this agent", async () => {
+    const tools = createT3Tools();
+    const revoke = tools.find(t => t.name === "t3_revoke_payroll_authorization")!;
+    await expect(
+      revoke.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined),
+    ).rejects.toThrow(/no issued credential|t3_authorize_payroll_agent/i);
+  });
+
+  it("revokes the whole credential when no functions are specified", async () => {
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    await authorize.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+
+    const revoke = tools.find(t => t.name === "t3_revoke_payroll_authorization")!;
+    const res = await revoke.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.revoked_entirely).toBe(true);
+    expect(sc.revoked_functions).toBeNull();
+    expect(mockRevokeDelegation).toHaveBeenCalledWith(
+      expect.objectContaining({ revokedFunctions: undefined }),
+    );
+  });
+
+  it("narrows the credential when specific functions are revoked", async () => {
+    const tools = createT3Tools();
+    const verify = tools.find(t => t.name === "t3_verify_identity")!;
+    await verify.handler({ agent_id: "agent-alpha" }, {} as never, undefined, undefined);
+    const authorize = tools.find(t => t.name === "t3_authorize_payroll_agent")!;
+    await authorize.handler(
+      { agent_id: "agent-alpha", functions: ["compute-payroll", "validate-credentials"] },
+      {} as never, undefined, undefined,
+    );
+
+    const revoke = tools.find(t => t.name === "t3_revoke_payroll_authorization")!;
+    const res = await revoke.handler(
+      { agent_id: "agent-alpha", functions: ["compute-payroll"] },
+      {} as never, undefined, undefined,
+    );
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.revoked_entirely).toBe(false);
+    expect(sc.revoked_functions).toEqual(["compute-payroll"]);
   });
 });
