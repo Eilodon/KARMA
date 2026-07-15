@@ -1,15 +1,25 @@
 # KARMA — Stellar ZK + x402 fast-lane demo
 
-> Stellar Hacks: Real-World ZK hackathon submission, T8 deliverable of the internal
-> stellar-casper-tracks build plan.
+> APAC Stellar Hackathon submission — user-facing framing added 2026-07-15, on top of the
+> original T8 deliverable of the internal stellar-casper-tracks build plan.
 
-This document is what a judge or reproducer should follow to see KARMA's
-"trustless fast-lane" working end-to-end on Stellar Testnet: a ZK credential
-proof + a USDC x402 payment, delivered in **one HTTP request**, with no
-KARMA server in the invocation path. **This is live, not aspirational** —
-see [Reproducing the live x402 + ZK flow](#reproducing-the-live-x402--zk-flow)
-for the real run: a real USDC settlement tx + a real on-chain proof
-verification, both from a single client-side HTTP POST.
+**The story, in one sentence:** a freelancer finishes a job for a client she's never met,
+proves she's reliable without revealing who she worked for or what she scored, gets paid
+the instant the client releases funds, and opens a real cash-out toward local currency —
+no platform standing in the middle taking a cut or holding the trust.
+
+**Short on time?** [Live walkthrough page](https://eilodon.github.io/KARMA/media/stellar-judges.html)
+— the same story below, with a real captured terminal transcript and a screenshot of the
+anchor's own status page, instead of a wall of markdown.
+
+This document is what a judge or reproducer should follow to see that story working
+end-to-end on Stellar Testnet, live: a ZK reputation proof + a USDC x402 payment,
+delivered in **one HTTP request**, with no KARMA server in the invocation path.
+**This is live, not aspirational** — see
+[Reproducing the live x402 + ZK flow](#reproducing-the-live-x402--zk-flow) for the real
+run: a real USDC settlement tx + a real on-chain proof verification, both from a single
+client-side HTTP POST, and [Cashing out to local currency](#cashing-out-to-local-currency-sep-24)
+for the real SEP-24 anchor handshake.
 
 ![Live Stellar Testnet terminal: real WASM fetch, real on-chain reads, a real replay attack rejected by two independently deployed Groth16/BN254 verifiers](docs/media/stellar-live-evidence.gif)
 
@@ -303,6 +313,56 @@ Skills 44 and 45 (same fixture pattern, also committed under
 two takes, since the first accidentally printed its internal timing markers
 to the terminal. Both are real, on-chain, in the same style as skill 43's.
 
+## Cashing out to local currency (SEP-24)
+
+The last leg of the freelancer story: turning a settled USDC payment into money that's
+actually spendable locally. `src/scripts/demo_stellar_anchor_cashout.ts` (`pnpm
+demo:stellar:anchor`) runs the real SEP-24 protocol handshake against
+[`testanchor.stellar.org`](https://testanchor.stellar.org/.well-known/stellar.toml) —
+the Stellar Development Foundation's own public reference anchor, not a stub we control.
+
+What actually runs, end to end:
+
+1. **SEP-1 discovery** — fetches the anchor's real `stellar.toml`, reads
+   `WEB_AUTH_ENDPOINT` and `TRANSFER_SERVER_SEP0024`.
+2. **SEP-10 auth** — requests a challenge transaction, signs it with agent-alpha's real
+   Stellar keypair (`KeystoreManager.getStellarKeypair`, the same signer used for the
+   x402 leg above), submits it, and receives a real session JWT.
+3. **SEP-24 interactive withdrawal** — POSTs `asset_code=USDC` + the account to
+   `/transactions/withdraw/interactive` and gets back a real anchor-issued transaction
+   `id` and an `interactive_url`.
+4. **Status poll** — `GET /transaction?id=...` returns the real transaction record
+   (`status: "incomplete"`, `from`/`to` addresses) straight from the anchor.
+
+Real run (2026-07-15), transaction `4599c222-ff80-4ec3-962f-fa9b51db9a08`:
+
+```
+$ pnpm exec tsx src/scripts/demo_stellar_anchor_cashout.ts
+[anchor] fetching SEP-1 stellar.toml from testanchor.stellar.org...
+[client] agent-alpha (GCW7IISXE4DPFRJVP56V22CYHRGICK6S4JTUL4262MPNWYCQTKTGVW3H) — requesting SEP-10 challenge...
+[client] real SEP-10 JWT obtained (session token, not a stub)
+[anchor] interactive withdrawal opened: { type: 'interactive_customer_info_needed', id: '4599c222-ff80-4ec3-962f-fa9b51db9a08' }
+[anchor] real transaction record: { status: 'incomplete', from: 'GCW7II...GVW3H', to: 'GBN4NN...7BXVQF' }
+[demo] SEP-24 handshake PASS
+```
+
+We also opened the anchor's own hosted status page for this transaction in a real
+browser (not our UI — `testanchor.stellar.org`'s own reference SEP-24 frontend) and
+confirmed it independently renders the same data — screenshot:
+[`docs/media/stellar-anchor-txn-status.png`](docs/media/stellar-anchor-txn-status.png).
+
+**Honest scope.** SEP-24's interactive step is anchor-hosted KYC, built for a human to
+click through by design — a script cannot finish it server-side, and this repo doesn't
+pretend otherwise. What's proven real here is the full protocol handshake (discovery,
+auth, request, status poll, independently confirmed by a second real client — the
+browser) against Stellar's own infrastructure. A production wallet would open
+`interactive_url` for the user at this point; that UI layer is the near-term next step,
+not built today.
+
+**Engineering note found while testing:** the anchor's SEP-10 JWT is short-lived
+(~10 minutes) — a production integration must request a fresh challenge immediately
+before opening the interactive URL rather than caching an older token.
+
 ## Submission notes
 
 - **Soundness fixes shipped before the final deploy.** An earlier internal
@@ -340,3 +400,10 @@ to the terminal. Both are real, on-chain, in the same style as skill 43's.
   `contracts-soroban/.../src/lib.rs:crypto::verify_groth16` has no `ark-*`
   dependency at all — see `contracts-soroban/agent_credential_verifier/README.md`
   for the exact host-function call sequence and point encoding.
+
+- **End-user onboarding is still self-custody-first.** The freelancer story above assumes a
+  wallet already exists (this repo provisions Stellar keys via `KeystoreManager`, deriving an
+  ed25519 seed from an existing secp256k1 key — see `src/lib/keystore.ts`). A real non-crypto-
+  native user would need a custodial-lite or social-login-derived wallet in front of this;
+  that onboarding layer is near-term roadmap, not built today, and disclosed here rather than
+  implied.

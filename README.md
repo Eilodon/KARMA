@@ -35,12 +35,20 @@
 > all captured from real terminal runs against the live contract, all real tx hashes, real
 > `testnet.cspr.live` screenshots, no typed-out copy.
 
-> **Proof this is a protocol, not a single-chain app:** the same identity/reputation/settlement
-> model that's live on Casper above also runs on **Stellar** — a Groth16/BN254 zero-knowledge
-> reputation gate, verified on-chain via Soroban's native host functions (CAP-0074), settling
-> per-call in USDC over x402. Architecture, live contract addresses, and the captured terminal
-> evidence are in [Zero-knowledge reputation gating](#architecture-zero-knowledge-reputation-gating-proven-on-stellar)
-> below; full write-up in [DEMO_STELLAR.md](DEMO_STELLAR.md).
+> ⭐ **APAC Stellar Hackathon — Stellar judges start here:** [DEMO_STELLAR.md](DEMO_STELLAR.md) ·
+> [live walkthrough page](https://eilodon.github.io/KARMA/media/stellar-judges.html) —
+> a freelancer proves her reputation with a zero-knowledge proof, gets paid per job over x402, and
+> opens a real SEP-24 cash-out — the same identity/reputation/settlement model that's live on
+> Casper above, proven on a second chain with its own native ZK verifier.
+>
+> Real Groth16/BN254 proof verified on-chain via Soroban's native host functions (CAP-0074) — two
+> soundness bugs found in an internal audit, both patched and disclosed. Real USDC settlement over
+> x402, proof + payment in **one HTTP request**. Real SEP-24 handshake against Stellar's own
+> public test anchor (SEP-1 discovery → SEP-10 auth → SEP-24 interactive withdrawal), with a
+> screenshot of the anchor's own live status page in [DEMO_STELLAR.md](DEMO_STELLAR.md). Full
+> architecture, live contract addresses, and the captured terminal evidence:
+> [Zero-knowledge reputation gating](#architecture-zero-knowledge-reputation-gating-proven-on-stellar)
+> below.
 
 > A protocol for agent economies — not a single-chain app. Agents publish skills, get discovered
 > by relevance and reputation, and invoke each other under enforceable trust gates: identity,
@@ -142,9 +150,11 @@ Full comparison: [docs/standards/relation-to-adjacent-standards.md](docs/standar
 
 ## Architecture: zero-knowledge reputation gating (proven on Stellar)
 
-One of KARMA's trust primitives — "prove your reputation clears this skill's threshold without
-revealing the score, job history, or identity" — is live today, verified on-chain via native
-BN254 host functions:
+**In practice:** a freelancer proves she's reliable enough for a job — without revealing who
+she's worked for, what she scored, or her job history — then gets paid the moment the work is
+confirmed. One of KARMA's trust primitives — "prove your reputation clears this skill's
+threshold without revealing the score, job history, or identity" — is live today, verified
+on-chain via native BN254 host functions:
 
 ```text
 Agent (client-side, off-chain)             Soroban verifier (on-chain, Stellar Testnet)
@@ -338,6 +348,7 @@ gate, proven on a second chain; full tx table + reproduction steps in
 |---|---|
 | **`agent_credential_verifier`** | [`CDBIDMG22BBIQPSWBNPMUOXXH7XJMHUHASEQYS3TDH766WSATCJT4GTP`](https://stellar.expert/explorer/testnet/contract/CDBIDMG22BBIQPSWBNPMUOXXH7XJMHUHASEQYS3TDH766WSATCJT4GTP) |
 | **`reputation_aggregation_verifier`** | [`CDR55NDIGKCWJXKQ334TNVHUAS37Q2ZBBGZZAV25OR6IC5O54UA7SRMO`](https://stellar.expert/explorer/testnet/contract/CDR55NDIGKCWJXKQ334TNVHUAS37Q2ZBBGZZAV25OR6IC5O54UA7SRMO) |
+| **Local anchor cash-out (SEP-24)** | real handshake against [`testanchor.stellar.org`](https://testanchor.stellar.org/.well-known/stellar.toml) — SEP-1 + SEP-10 + SEP-24 interactive withdrawal, screenshot + transcript in [DEMO_STELLAR.md](DEMO_STELLAR.md#cashing-out-to-local-currency-sep-24) |
 
 <details>
 <summary><strong>Pharos + Terminal3</strong> (the original chain the spec was extracted from)</summary>
@@ -438,7 +449,9 @@ HTTP transport, production auth (JWT/OIDC), Docker, and the full configuration r
 ## Demo
 
 *(Pharos escrow demo below. For the Casper live demo, see [DEMO_CASPER.md](DEMO_CASPER.md); for
-the zero-knowledge reputation gate proven on Stellar, see [DEMO_STELLAR.md](DEMO_STELLAR.md).)*
+the zero-knowledge reputation gate + x402 payment + SEP-24 local cash-out proven on Stellar, see
+[DEMO_STELLAR.md](DEMO_STELLAR.md) or the [live walkthrough page](https://eilodon.github.io/KARMA/media/stellar-judges.html)
+— `pnpm demo:stellar:x402` then `pnpm demo:stellar:anchor`.)*
 
 ```bash
 pnpm demo:discover     # offline: BM25 ranking + injection sanitization, no chain/keystore
