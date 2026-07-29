@@ -63,7 +63,7 @@
     "jose": "^6.2.3",
     "minisearch": "^7.2.0",
     "snarkjs": "^0.7.6",
-    "viem": "^2.52.2",
+    "viem": "^2.55.7",
     "zod": "^4.1.13"
   },
   "devDependencies": {
