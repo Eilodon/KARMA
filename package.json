@@ -38,7 +38,7 @@
     "test:plugin:permission": "vitest run src/__tests__/plugin_external_runner.test.ts -t \"optional Node permission hardening\""
   },
   "dependencies": {
-    "@aws-sdk/client-kms": "^3.1068.0",
+    "@aws-sdk/client-kms": "^3.1093.0",
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/express": "^2.0.0-beta.2",
     "@modelcontextprotocol/node": "^2.0.0-beta.2",
