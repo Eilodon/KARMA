@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 odra = { version = "=2.8.2", default-features = false }
 
 [build-dependencies]
-odra-build = "=2.8.2"
+odra-build = "=2.9.1"
 
 [dev-dependencies]
 odra-test = "=2.8.2"
